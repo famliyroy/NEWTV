@@ -49,6 +49,51 @@ class SettingsPage extends ConsumerWidget {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
+              Text('播放', style: Theme.of(context).textTheme.titleMedium),
+              SwitchListTile(
+                contentPadding: EdgeInsets.zero,
+                title: const Text('自动连播下一集'),
+                subtitle: const Text('当前剧集播放结束后自动无缝切换下一集'),
+                value: settings.autoplayNext,
+                onChanged: (value) => dependencies.settings.update(settings.copyWith(autoplayNext: value)),
+              ),
+              SwitchListTile(
+                contentPadding: EdgeInsets.zero,
+                title: const Text('硬件解码优先'),
+                subtitle: const Text('优先调用 GPU 硬件加速解码，异常时回退软解'),
+                value: settings.hardwareDecode,
+                onChanged: (value) => dependencies.settings.update(settings.copyWith(hardwareDecode: value)),
+              ),
+              SwitchListTile(
+                contentPadding: EdgeInsets.zero,
+                title: const Text('服务端去广告切片'),
+                subtitle: const Text('通过 /api/proxy-m3u8 自动剔除插播广告切片'),
+                value: settings.adblock,
+                onChanged: (value) => dependencies.settings.update(settings.copyWith(adblock: value)),
+              ),
+              SwitchListTile(
+                contentPadding: EdgeInsets.zero,
+                title: const Text('代理 TS 分片'),
+                subtitle: const Text('源站防盗链严格无法直连分片时开启（消耗服务端带宽）'),
+                value: settings.proxySegments,
+                onChanged: (value) => dependencies.settings.update(settings.copyWith(proxySegments: value)),
+              ),
+              TextFormField(
+                initialValue: settings.playbackToken,
+                decoration: const InputDecoration(
+                  labelText: '播放代理令牌（可选）',
+                  hintText: '对应服务端 NEXT_PUBLIC_PROXY_M3U8_TOKEN',
+                ),
+                onChanged: (value) => dependencies.settings.update(settings.copyWith(playbackToken: value.trim())),
+              ),
+            ],
+          ),
+        ),
+        const SizedBox(height: 16),
+        GlassCard(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
               Text('弹幕', style: Theme.of(context).textTheme.titleMedium),
               SwitchListTile(
                 contentPadding: EdgeInsets.zero,
@@ -112,11 +157,20 @@ class SettingsPage extends ConsumerWidget {
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               Text('关于', style: Theme.of(context).textTheme.titleMedium),
-              const ListTile(
+              ListTile(
                 contentPadding: EdgeInsets.zero,
-                leading: Icon(Icons.info_outline),
-                title: Text('NEWTV'),
-                subtitle: Text('MoonTVPlus 原生客户端 · 含 MoonTVPlus CC BY-NC-SA 4.0 与 NipaPlay-Reload MIT 声明'),
+                leading: const Icon(Icons.info_outline),
+                title: const Text('NEWTV · v0.1.0'),
+                subtitle: const Text('MoonTVPlus 多端原生客户端（支持 Windows / Android / Android TV）'),
+                trailing: TextButton(
+                  onPressed: () => showLicensePage(
+                    context: context,
+                    applicationName: 'NEWTV',
+                    applicationVersion: '0.1.0',
+                    applicationLegalese: '后端协议兼容：MoonTVPlus (CC BY-NC-SA 4.0)\n界面交互致谢：NipaPlay-Reload (MIT)',
+                  ),
+                  child: const Text('开源许可'),
+                ),
               ),
             ],
           ),

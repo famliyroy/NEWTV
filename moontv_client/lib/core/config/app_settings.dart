@@ -17,6 +17,7 @@ class AppSettings {
     this.hardwareDecode = true,
     this.adblock = true,
     this.proxySegments = false,
+    this.playbackToken = '',
   });
 
   final int themeModeIndex;
@@ -32,6 +33,7 @@ class AppSettings {
   final bool hardwareDecode;
   final bool adblock;
   final bool proxySegments;
+  final String playbackToken;
 
   AppSettings copyWith({
     int? themeModeIndex,
@@ -47,6 +49,7 @@ class AppSettings {
     bool? hardwareDecode,
     bool? adblock,
     bool? proxySegments,
+    String? playbackToken,
   }) {
     return AppSettings(
       themeModeIndex: themeModeIndex ?? this.themeModeIndex,
@@ -62,6 +65,7 @@ class AppSettings {
       hardwareDecode: hardwareDecode ?? this.hardwareDecode,
       adblock: adblock ?? this.adblock,
       proxySegments: proxySegments ?? this.proxySegments,
+      playbackToken: playbackToken ?? this.playbackToken,
     );
   }
 }
@@ -82,6 +86,7 @@ class SettingsController extends ChangeNotifier {
       hardwareDecode: _preferences.getBool('hardwareDecode') ?? true,
       adblock: _preferences.getBool('adblock') ?? true,
       proxySegments: _preferences.getBool('proxySegments') ?? false,
+      playbackToken: _preferences.getString('playbackToken') ?? '',
     );
   }
 
@@ -106,6 +111,7 @@ class SettingsController extends ChangeNotifier {
       _preferences.setBool('hardwareDecode', value.hardwareDecode),
       _preferences.setBool('adblock', value.adblock),
       _preferences.setBool('proxySegments', value.proxySegments),
+      _preferences.setString('playbackToken', value.playbackToken),
     ]);
   }
 }

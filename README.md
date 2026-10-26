@@ -1,9 +1,52 @@
-# MoonTVPlus 原生客户端（Windows + Android）
+# NEWTV — MoonTVPlus 原生多端客户端（Windows / Android / Android TV）
 
-为已在服务器运行的 [mtvpls/MoonTVPlus](https://github.com/mtvpls/MoonTVPlus) 写一套**原生 Flutter 客户端**：界面参考 [NipaPlay-Reload](https://github.com/AimesSoft/NipaPlay-Reload) 的设计语言，**弹幕多源自动加载、零点击**，后端零改动。
+为已在服务器运行的 [mtvpls/MoonTVPlus](https://github.com/mtvpls/MoonTVPlus) 打造的**原生 Flutter 客户端**（位于 `moontv_client/`）：界面与交互参考 [NipaPlay-Reload](https://github.com/AimesSoft/NipaPlay-Reload) 的暗色玻璃拟态与两段式播放控制设计语言，支持**弹幕多源全自动聚合加载（零点击）**、**播放进度与收藏跨端实时同步**，后端零改动。
 
-> 当前阶段：**方案与计划已完成，尚未编写任何代码。**
-> 本仓库此阶段只承载文档，不含上游源码，也不含任何服务器地址。
+> **安全声明**：本仓库不包含任何私人服务器域名、IP、密码或影视源，首次启动由用户自行填写自建服务器地址。
+
+---
+
+## 核心特性
+
+- **多平台同源构建**：一套 Flutter 3 + `media_kit`（libmpv）代码同时构建 **Windows EXE**、**Android 手机 APK** 与 **Android TV（Leanback + DPAD 遥控焦点导航）**。
+- **全自动多源弹幕聚合**：
+  - 标题清洗（剔除季数/语种/分辨率标签）→ 多源搜索 → P0–P4 优先级剧集匹配（严禁盲取第一集）→ 最大 6 路并发拉取 → `0.1s 时间桶 + 归一化文本` 合并去重。
+  - `CustomPainter` 二分查找时间窗三轨渲染（滚动 / 顶部 / 底部），与视频起播完全并行，零弹窗静默降级，本地缓存 7 天 TTL。
+- **NipaPlay 风格玻璃拟态 UI 与两段式播放器**：
+  - `GlassCard`（`BackdropFilter` + 半透明层 + 1px 高光描边），支持深浅色主题与减弱动效模式。
+  - 播放页 3 秒无操作自动收起至底部极简进度细条；支持双击左右 ±10s、长按 2.0x 临时倍速、0.5x–3.0x 常驻倍速、画面比例切换、自动连播下一集及桌面端快捷键（`Space` / `←` / `→` / `F` / `D` / `N` / `Esc`）。
+- **与 MoonTVPlus 后端深度同步**：
+  - 完整持久化 HMAC 签名 CookieJar，遇 `401` 单飞调用 `/api/auth/refresh` 自动续期并重放原请求一次。
+  - 播放流统一走免鉴权 `/api/proxy-m3u8`（支持去广告切片、TS 分片代理与可选播放令牌）。
+  - 观看历史（每 30s 及切集/退出自动上报 `/api/playrecords`、断点续播）与收藏夹（`/api/favorites`）跨设备实时同步。
+
+---
+
+## 快速开始与构建说明
+
+### 1. 本地开发与测试
+
+```bash
+cd moontv_client
+flutter pub get
+dart analyze
+flutter test
+```
+
+### 2. 打包构建
+
+- **Android APK**：
+  ```bash
+  cd moontv_client
+  flutter build apk --release
+  ```
+- **Windows EXE**：
+  ```bash
+  cd moontv_client
+  flutter config --enable-windows-desktop
+  flutter build windows --release
+  ```
+- **GitHub Actions 自动构建**：推送至 `main`、`develop`、`release/*` 分支或 `v*` 标签时，`.github/workflows/ci.yml` 自动执行静态分析、76 项单元测试、安全合规门禁扫描，并产出 `newtv-android`（APK + SHA256）与 `newtv-windows`（ZIP + SHA256）构建产物。
 
 ---
 

@@ -28,27 +28,78 @@ class PlayerPage extends ConsumerStatefulWidget {
 class _PlayerPageState extends ConsumerState<PlayerPage> {
   late final PlayerController _player;
   late final DanmakuController _danmaku;
+  late PlaybackContext _currentPlayback;
   Timer? _hideTimer;
+  Timer? _progressSyncTimer;
   var _controlsVisible = true;
   var _temporaryRate = false;
   double? _previousRate;
+  BoxFit _videoFit = BoxFit.contain;
 
   @override
   void initState() {
     super.initState();
+    _currentPlayback = widget.playback;
     final dependencies = ref.read(appDependenciesProvider);
     final settings = dependencies.settings.settings;
     final server = dependencies.session.server!;
-    _player = PlayerController(server: server, settings: settings);
+    _player = PlayerController(
+      server: server,
+      settings: settings,
+      onCompleted: _handleEpisodeCompleted,
+    );
     _danmaku = DanmakuController(
       DanmakuRepository(DanmakuApi(dependencies.dioClient.dio)),
       dependencies.settings,
     );
     _player.addListener(() => _danmaku.setPosition(_player.position.inMilliseconds / 1000));
-    unawaited(_player.open(widget.playback));
-    unawaited(_danmaku.loadFor(widget.playback));
+    unawaited(_player.open(_currentPlayback));
+    unawaited(_danmaku.loadFor(_currentPlayback));
+    _progressSyncTimer = Timer.periodic(
+      const Duration(seconds: 30),
+      (_) => unawaited(_syncPlayProgress()),
+    );
     _enterImmersiveMode();
     _scheduleHide();
+  }
+
+  Future<void> _syncPlayProgress() async {
+    final playSec = _player.position.inSeconds;
+    final totalSec = _player.duration.inSeconds;
+    if (playSec <= 0) return;
+    try {
+      await ref.read(appDependenciesProvider).mediaRepository.savePlayRecord(
+            _currentPlayback.item,
+            episodeIndex: _currentPlayback.episodeIndex,
+            playTimeSeconds: playSec,
+            totalTimeSeconds: totalSec,
+          );
+    } on Object {
+      // Progress sync errors should not interrupt playback.
+    }
+  }
+
+  void _handleEpisodeCompleted() {
+    unawaited(_syncPlayProgress());
+    final settings = ref.read(appDependenciesProvider).settings.settings;
+    if (settings.autoplayNext && _player.hasNextEpisode) {
+      unawaited(_switchEpisode(_currentPlayback.episodeIndex + 1));
+    }
+  }
+
+  Future<void> _switchEpisode(int nextIndex) async {
+    if (nextIndex < 0 || nextIndex >= _currentPlayback.item.episodes.length) return;
+    await _syncPlayProgress();
+    _danmaku.clear();
+    final nextContext = PlaybackContext(
+      item: _currentPlayback.item,
+      episodeIndex: nextIndex,
+      availableSources: _currentPlayback.availableSources,
+    );
+    if (!mounted) return;
+    setState(() => _currentPlayback = nextContext);
+    unawaited(_player.open(nextContext));
+    unawaited(_danmaku.loadFor(nextContext));
   }
 
   void _enterImmersiveMode() {
@@ -62,6 +113,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
   }
 
   Future<void> _exitPage() async {
+    await _syncPlayProgress();
     if (Platform.isAndroid) {
       await SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
       await SystemChrome.setPreferredOrientations(DeviceOrientation.values);
@@ -99,7 +151,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
 
   void _startTemporaryRate() {
     if (_temporaryRate) return;
-    _previousRate = 1;
+    _previousRate = _player.rate;
     _temporaryRate = true;
     unawaited(_player.setRate(2));
   }
@@ -110,9 +162,21 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
     unawaited(_player.setRate(_previousRate ?? 1));
   }
 
+  void _cycleVideoFit() {
+    setState(() {
+      _videoFit = switch (_videoFit) {
+        BoxFit.contain => BoxFit.cover,
+        BoxFit.cover => BoxFit.fill,
+        _ => BoxFit.contain,
+      };
+    });
+    _showControls();
+  }
+
   @override
   void dispose() {
     _hideTimer?.cancel();
+    _progressSyncTimer?.cancel();
     _player.dispose();
     _danmaku.dispose();
     super.dispose();
@@ -133,6 +197,11 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
           const SingleActivator(LogicalKeyboardKey.arrowRight): () => unawaited(_player.seekRelative(const Duration(seconds: 5))),
           const SingleActivator(LogicalKeyboardKey.keyF): () => unawaited(_toggleFullscreen()),
           const SingleActivator(LogicalKeyboardKey.keyD): () => _danmaku.setEnabled(!_danmaku.enabled),
+          const SingleActivator(LogicalKeyboardKey.keyN): () {
+            if (_player.hasNextEpisode) {
+              unawaited(_switchEpisode(_currentPlayback.episodeIndex + 1));
+            }
+          },
           const SingleActivator(LogicalKeyboardKey.escape): () => unawaited(_exitPage()),
         },
         child: Focus(
@@ -161,6 +230,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
                   children: [
                     Video(
                       controller: _player.videoController,
+                      fit: _videoFit,
                       controls: (state) => const SizedBox.shrink(),
                     ),
                     DanmakuOverlay(controller: _danmaku, settings: settings),
@@ -172,12 +242,17 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
                       player: _player,
                       danmaku: _danmaku,
                       visible: _controlsVisible,
-                      title: '${widget.playback.item.title} · ${widget.playback.item.episodeLabel(widget.playback.episodeIndex)}',
+                      title: '${_currentPlayback.item.title} · ${_currentPlayback.item.episodeLabel(_currentPlayback.episodeIndex)}',
                       onBack: _exitPage,
                       onToggle: () => unawaited(_player.toggle()),
                       onSeek: (value) => unawaited(_player.seek(value)),
                       onBack10: () => unawaited(_player.seekRelative(const Duration(seconds: -10))),
                       onForward10: () => unawaited(_player.seekRelative(const Duration(seconds: 10))),
+                      onNextEpisode: _player.hasNextEpisode
+                          ? () => unawaited(_switchEpisode(_currentPlayback.episodeIndex + 1))
+                          : null,
+                      onRateChanged: (rate) => unawaited(_player.setRate(rate)),
+                      onCycleFit: _cycleVideoFit,
                       onToggleDanmaku: () => _danmaku.setEnabled(!_danmaku.enabled),
                       onDanmakuSettings: () {
                         showModalBottomSheet<void>(
@@ -239,6 +314,9 @@ class _ControlsOverlay extends StatelessWidget {
     required this.onSeek,
     required this.onBack10,
     required this.onForward10,
+    required this.onNextEpisode,
+    required this.onRateChanged,
+    required this.onCycleFit,
     required this.onToggleDanmaku,
     required this.onDanmakuSettings,
     required this.onInteract,
@@ -253,6 +331,9 @@ class _ControlsOverlay extends StatelessWidget {
   final ValueChanged<Duration> onSeek;
   final VoidCallback onBack10;
   final VoidCallback onForward10;
+  final VoidCallback? onNextEpisode;
+  final ValueChanged<double> onRateChanged;
+  final VoidCallback onCycleFit;
   final VoidCallback onToggleDanmaku;
   final VoidCallback onDanmakuSettings;
   final VoidCallback onInteract;
@@ -311,6 +392,12 @@ class _ControlsOverlay extends StatelessWidget {
                                   style: const TextStyle(color: Colors.white, fontSize: 17, fontWeight: FontWeight.w600),
                                 ),
                               ),
+                              IconButton.filledTonal(
+                                tooltip: '切换画面比例',
+                                onPressed: onCycleFit,
+                                icon: const Icon(Icons.aspect_ratio),
+                              ),
+                              const SizedBox(width: 8),
                             ],
                           ),
                           const Spacer(),
@@ -327,6 +414,10 @@ class _ControlsOverlay extends StatelessWidget {
                               ),
                               const SizedBox(width: 32),
                               _RoundControl(icon: Icons.forward_10, tooltip: '前进 10 秒', onPressed: onForward10),
+                              if (onNextEpisode != null) ...[
+                                const SizedBox(width: 24),
+                                _RoundControl(icon: Icons.skip_next, tooltip: '下一集', onPressed: onNextEpisode!),
+                              ],
                             ],
                           ),
                           const Spacer(),
@@ -336,13 +427,41 @@ class _ControlsOverlay extends StatelessWidget {
                               children: [
                                 Text(_format(position), style: const TextStyle(color: Colors.white70)),
                                 const Spacer(),
+                                PopupMenuButton<double>(
+                                  tooltip: '倍速',
+                                  initialValue: player.rate,
+                                  onSelected: onRateChanged,
+                                  itemBuilder: (context) => const [
+                                    PopupMenuItem(value: 0.5, child: Text('0.5x')),
+                                    PopupMenuItem(value: 0.75, child: Text('0.75x')),
+                                    PopupMenuItem(value: 1.0, child: Text('1.0x')),
+                                    PopupMenuItem(value: 1.25, child: Text('1.25x')),
+                                    PopupMenuItem(value: 1.5, child: Text('1.5x')),
+                                    PopupMenuItem(value: 2.0, child: Text('2.0x')),
+                                    PopupMenuItem(value: 3.0, child: Text('3.0x')),
+                                  ],
+                                  child: Padding(
+                                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                                    child: Text(
+                                      '${player.rate.toStringAsFixed(player.rate == player.rate.roundToDouble() ? 1 : 2)}x',
+                                      style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w600),
+                                    ),
+                                  ),
+                                ),
+                                const SizedBox(width: 6),
                                 GestureDetector(
                                   onLongPress: onDanmakuSettings,
                                   child: IconButton.filledTonal(
-                                    tooltip: danmaku.enabled ? '关闭弹幕' : '开启弹幕',
+                                    tooltip: danmaku.enabled ? '关闭弹幕（长按设置）' : '开启弹幕（长按设置）',
                                     onPressed: onToggleDanmaku,
                                     icon: Icon(danmaku.enabled ? Icons.subtitles : Icons.subtitles_off),
                                   ),
+                                ),
+                                const SizedBox(width: 4),
+                                IconButton.filledTonal(
+                                  tooltip: '弹幕设置',
+                                  onPressed: onDanmakuSettings,
+                                  icon: const Icon(Icons.tune, size: 20),
                                 ),
                                 const SizedBox(width: 8),
                                 Text(_format(duration), style: const TextStyle(color: Colors.white70)),

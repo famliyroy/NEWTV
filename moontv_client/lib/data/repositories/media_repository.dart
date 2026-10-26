@@ -26,14 +26,43 @@ class MediaRepository {
       return cached.item;
     }
     final result = await _api.detail(item);
-    _details[key] = _TimedDetail(result);
-    return result;
+    final merged = result.copyWith(
+      lastEpisodeIndex: item.lastEpisodeIndex,
+      playTimeSeconds: item.playTimeSeconds,
+      totalTimeSeconds: item.totalTimeSeconds,
+      saveTime: item.saveTime,
+    );
+    _details[key] = _TimedDetail(merged);
+    return merged;
   }
 
   Future<List<MediaItem>> recommendations() => _api.recommendations();
   Future<List<MediaItem>> history() => _api.history();
   Future<List<MediaItem>> favorites() => _api.favorites();
   Future<List<MediaItem>> bangumi() => _api.bangumi();
+
+  Future<void> savePlayRecord(
+    MediaItem item, {
+    required int episodeIndex,
+    required int playTimeSeconds,
+    required int totalTimeSeconds,
+  }) =>
+      _api.savePlayRecord(
+        item,
+        episodeIndex: episodeIndex,
+        playTimeSeconds: playTimeSeconds,
+        totalTimeSeconds: totalTimeSeconds,
+      );
+
+  Future<void> deletePlayRecord(MediaItem item) => _api.deletePlayRecord(item);
+  Future<void> saveFavorite(MediaItem item) => _api.saveFavorite(item);
+  Future<void> deleteFavorite(MediaItem item) => _api.deleteFavorite(item);
+
+  Future<bool> isFavorite(MediaItem item) async {
+    if (item.source.isEmpty || item.id.isEmpty) return false;
+    final list = await _api.favorites();
+    return list.any((entry) => entry.storageKey == item.storageKey);
+  }
 }
 
 class _TimedDetail {

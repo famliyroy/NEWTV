@@ -40,6 +40,9 @@ void main() {
       'source_code': 'test',
       'episodes': ['a', 'b'],
       'vod_year': 2026,
+      'index': 2,
+      'play_time': 125,
+      'total_time': 1400,
     });
     expect(item.id, '12');
     expect(item.title, '作品');
@@ -47,5 +50,9 @@ void main() {
     expect(item.year, '2026');
     expect(item.episodeTitles, isEmpty);
     expect(item.episodeLabel(1), '第 2 集');
+    expect(item.lastEpisodeIndex, 1);
+    expect(item.playTimeSeconds, 125);
+    expect(item.totalTimeSeconds, 1400);
+    expect(item.storageKey, 'test+12');
   });
 }

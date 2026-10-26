@@ -25,19 +25,58 @@ class _DetailPageState extends ConsumerState<DetailPage> {
   late MediaItem _selectedSource;
   late Future<MediaItem> _future;
   var _selectedEpisode = 0;
+  var _favorited = false;
+  var _favoriteBusy = false;
 
   @override
   void initState() {
     super.initState();
     _selectedSource = widget.initialItem;
+    _selectedEpisode = widget.initialItem.lastEpisodeIndex;
     _future = _load();
+    _checkFavorite();
   }
 
-  Future<MediaItem> _load({bool force = false}) {
-    return ref.read(appDependenciesProvider).mediaRepository.detail(
+  Future<void> _checkFavorite() async {
+    try {
+      final fav = await ref.read(appDependenciesProvider).mediaRepository.isFavorite(_selectedSource);
+      if (mounted) setState(() => _favorited = fav);
+    } on Object {
+      // Ignore favorite check failures.
+    }
+  }
+
+  Future<void> _toggleFavorite(MediaItem item) async {
+    if (_favoriteBusy) return;
+    setState(() => _favoriteBusy = true);
+    final repo = ref.read(appDependenciesProvider).mediaRepository;
+    try {
+      if (_favorited) {
+        await repo.deleteFavorite(item);
+        if (mounted) setState(() => _favorited = false);
+      } else {
+        await repo.saveFavorite(item);
+        if (mounted) setState(() => _favorited = true);
+      }
+    } on Object {
+      // Keep previous state on network error.
+    } finally {
+      if (mounted) setState(() => _favoriteBusy = false);
+    }
+  }
+
+  Future<MediaItem> _load({bool force = false}) async {
+    final loaded = await ref.read(appDependenciesProvider).mediaRepository.detail(
           _selectedSource,
           force: force,
         );
+    if (mounted && loaded.episodes.isNotEmpty) {
+      final clamped = _selectedEpisode.clamp(0, loaded.episodes.length - 1);
+      if (clamped != _selectedEpisode) {
+        setState(() => _selectedEpisode = clamped);
+      }
+    }
+    return loaded;
   }
 
   void _changeSource(MediaItem source) {
@@ -45,6 +84,7 @@ class _DetailPageState extends ConsumerState<DetailPage> {
       _selectedSource = source;
       _future = _load();
     });
+    _checkFavorite();
   }
 
   @override
@@ -65,9 +105,19 @@ class _DetailPageState extends ConsumerState<DetailPage> {
             );
           }
           final item = snapshot.data ?? _selectedSource;
+          final safeEpisode = item.episodes.isEmpty
+              ? 0
+              : _selectedEpisode.clamp(0, item.episodes.length - 1);
           return CustomScrollView(
             slivers: [
-              SliverToBoxAdapter(child: _Header(item: item, loading: snapshot.connectionState == ConnectionState.waiting)),
+              SliverToBoxAdapter(
+                child: _Header(
+                  item: item,
+                  loading: snapshot.connectionState == ConnectionState.waiting,
+                  favorited: _favorited,
+                  onToggleFavorite: () => _toggleFavorite(item),
+                ),
+              ),
               SliverToBoxAdapter(
                 child: Padding(
                   padding: const EdgeInsets.all(20),
@@ -108,7 +158,7 @@ class _DetailPageState extends ConsumerState<DetailPage> {
                                 itemCount: item.episodes.length,
                                 separatorBuilder: (context, index) => const SizedBox(width: 8),
                                 itemBuilder: (context, index) {
-                                  final selected = index == _selectedEpisode;
+                                  final selected = index == safeEpisode;
                                   return FilledButton.tonal(
                                     style: FilledButton.styleFrom(
                                       backgroundColor: selected ? Theme.of(context).colorScheme.primary : null,
@@ -121,19 +171,34 @@ class _DetailPageState extends ConsumerState<DetailPage> {
                               ),
                       ),
                       const SizedBox(height: 24),
-                      FilledButton.icon(
-                        onPressed: item.episodes.isEmpty
-                            ? null
-                            : () => context.push(
-                                  '/player',
-                                  extra: PlaybackContext(
-                                    item: item,
-                                    episodeIndex: _selectedEpisode,
-                                    availableSources: widget.availableSources,
-                                  ),
-                                ),
-                        icon: const Icon(Icons.play_arrow_rounded),
-                        label: Text('播放 ${item.episodeLabel(_selectedEpisode)}'),
+                      Wrap(
+                        spacing: 12,
+                        runSpacing: 12,
+                        children: [
+                          FilledButton.icon(
+                            onPressed: item.episodes.isEmpty
+                                ? null
+                                : () => context.push(
+                                      '/player',
+                                      extra: PlaybackContext(
+                                        item: item,
+                                        episodeIndex: safeEpisode,
+                                        availableSources: widget.availableSources,
+                                        initialPositionSeconds:
+                                            safeEpisode == item.lastEpisodeIndex
+                                                ? item.playTimeSeconds
+                                                : 0,
+                                      ),
+                                    ),
+                            icon: const Icon(Icons.play_arrow_rounded),
+                            label: Text('播放 ${item.episodeLabel(safeEpisode)}'),
+                          ),
+                          OutlinedButton.icon(
+                            onPressed: _favoriteBusy ? null : () => _toggleFavorite(item),
+                            icon: Icon(_favorited ? Icons.favorite : Icons.favorite_border),
+                            label: Text(_favorited ? '已收藏' : '加入收藏'),
+                          ),
+                        ],
                       ),
                     ],
                   ),
@@ -148,10 +213,17 @@ class _DetailPageState extends ConsumerState<DetailPage> {
 }
 
 class _Header extends StatelessWidget {
-  const _Header({required this.item, required this.loading});
+  const _Header({
+    required this.item,
+    required this.loading,
+    required this.favorited,
+    required this.onToggleFavorite,
+  });
 
   final MediaItem item;
   final bool loading;
+  final bool favorited;
+  final VoidCallback onToggleFavorite;
 
   @override
   Widget build(BuildContext context) {
@@ -176,7 +248,16 @@ class _Header extends StatelessWidget {
                     children: [
                       IconButton.filledTonal(onPressed: () => context.pop(), icon: const Icon(Icons.arrow_back)),
                       const Spacer(),
-                      if (loading) const SizedBox.square(dimension: 24, child: CircularProgressIndicator(strokeWidth: 2)),
+                      if (loading)
+                        const Padding(
+                          padding: EdgeInsets.only(right: 12),
+                          child: SizedBox.square(dimension: 22, child: CircularProgressIndicator(strokeWidth: 2)),
+                        ),
+                      IconButton.filledTonal(
+                        tooltip: favorited ? '取消收藏' : '收藏',
+                        onPressed: onToggleFavorite,
+                        icon: Icon(favorited ? Icons.favorite : Icons.favorite_border),
+                      ),
                     ],
                   ),
                   const Spacer(),
@@ -187,11 +268,14 @@ class _Header extends StatelessWidget {
                         width: 116,
                         child: AspectRatio(
                           aspectRatio: 2 / 3,
-                          child: ClipRRect(
-                            borderRadius: BorderRadius.circular(16),
-                            child: item.poster.isEmpty
-                                ? Container(color: Colors.white24)
-                                : CachedNetworkImage(imageUrl: item.poster, fit: BoxFit.cover),
+                          child: Hero(
+                            tag: 'poster-${item.storageKey}-${item.title}',
+                            child: ClipRRect(
+                              borderRadius: BorderRadius.circular(16),
+                              child: item.poster.isEmpty
+                                  ? Container(color: Colors.white24)
+                                  : CachedNetworkImage(imageUrl: item.poster, fit: BoxFit.cover),
+                            ),
                           ),
                         ),
                       ),

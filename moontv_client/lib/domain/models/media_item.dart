@@ -13,6 +13,11 @@ class MediaItem {
     this.typeName = '',
     this.doubanId = '',
     this.weight = 0,
+    this.lastEpisodeIndex = 0,
+    this.playTimeSeconds = 0,
+    this.totalTimeSeconds = 0,
+    this.saveTime = 0,
+    this.totalEpisodes = 0,
   });
 
   final String id;
@@ -28,8 +33,20 @@ class MediaItem {
   final String typeName;
   final String doubanId;
   final int weight;
+  final int lastEpisodeIndex;
+  final int playTimeSeconds;
+  final int totalTimeSeconds;
+  final int saveTime;
+  final int totalEpisodes;
+
+  String get storageKey => '$source+$id';
 
   static String _string(dynamic value) => value == null ? '' : '$value';
+
+  static int _int(dynamic value, [int fallback = 0]) {
+    if (value is num) return value.toInt();
+    return int.tryParse(_string(value)) ?? fallback;
+  }
 
   static List<String> _stringList(dynamic value) {
     if (value is List) {
@@ -40,26 +57,31 @@ class MediaItem {
   }
 
   factory MediaItem.fromJson(Map<String, dynamic> json) {
+    final rawIndex = _int(json['index'], 1);
+    final episodes = _stringList(json['episodes'] ?? json['vod_play_url']);
     return MediaItem(
       id: _string(json['id'] ?? json['vod_id'] ?? json['detailId']),
-      title: _string(json['title'] ?? json['vod_name'] ?? json['name']),
-      poster: _string(json['poster'] ?? json['vod_pic'] ?? json['cover']),
+      title: _string(json['title'] ?? json['vod_name'] ?? json['name'] ?? json['search_title']),
+      poster: _string(json['poster'] ?? json['vod_pic'] ?? json['cover'] ?? json['pic']),
       source: _string(json['source'] ?? json['source_code']),
       sourceName: _string(
         json['source_name'] ?? json['sourceName'] ?? json['source'],
       ),
-      episodes: _stringList(json['episodes'] ?? json['vod_play_url']),
+      episodes: episodes,
       episodeTitles: _stringList(
         json['episodes_titles'] ?? json['episodeTitles'],
       ),
       year: _string(json['year'] ?? json['vod_year']),
       description: _string(json['desc'] ?? json['vod_content'] ?? json['description']),
       remarks: _string(json['vod_remarks'] ?? json['remarks']),
-      typeName: _string(json['type_name'] ?? json['class']),
+      typeName: _string(json['type_name'] ?? json['class'] ?? json['weekday']),
       doubanId: _string(json['douban_id']),
-      weight: json['weight'] is num
-          ? (json['weight'] as num).toInt()
-          : int.tryParse(_string(json['weight'])) ?? 0,
+      weight: _int(json['weight']),
+      lastEpisodeIndex: rawIndex > 0 ? rawIndex - 1 : 0,
+      playTimeSeconds: _int(json['play_time']),
+      totalTimeSeconds: _int(json['total_time']),
+      saveTime: _int(json['save_time']),
+      totalEpisodes: _int(json['total_episodes'], episodes.length),
     );
   }
 
@@ -77,6 +99,11 @@ class MediaItem {
     String? typeName,
     String? doubanId,
     int? weight,
+    int? lastEpisodeIndex,
+    int? playTimeSeconds,
+    int? totalTimeSeconds,
+    int? saveTime,
+    int? totalEpisodes,
   }) {
     return MediaItem(
       id: id ?? this.id,
@@ -92,6 +119,11 @@ class MediaItem {
       typeName: typeName ?? this.typeName,
       doubanId: doubanId ?? this.doubanId,
       weight: weight ?? this.weight,
+      lastEpisodeIndex: lastEpisodeIndex ?? this.lastEpisodeIndex,
+      playTimeSeconds: playTimeSeconds ?? this.playTimeSeconds,
+      totalTimeSeconds: totalTimeSeconds ?? this.totalTimeSeconds,
+      saveTime: saveTime ?? this.saveTime,
+      totalEpisodes: totalEpisodes ?? this.totalEpisodes,
     );
   }
 
@@ -108,9 +140,11 @@ class PlaybackContext {
     required this.item,
     required this.episodeIndex,
     this.availableSources = const [],
+    this.initialPositionSeconds = 0,
   });
 
   final MediaItem item;
   final int episodeIndex;
   final List<MediaItem> availableSources;
+  final int initialPositionSeconds;
 }

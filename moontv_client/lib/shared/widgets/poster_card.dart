@@ -42,37 +42,40 @@ class _PosterCardState extends State<PosterCard> {
               children: [
                 AspectRatio(
                   aspectRatio: 2 / 3,
-                  child: ClipRRect(
-                    borderRadius: BorderRadius.circular(14),
-                    child: Stack(
-                      fit: StackFit.expand,
-                      children: [
-                        if (widget.item.poster.isEmpty)
-                          Container(color: scheme.surfaceContainerHighest)
-                        else
-                          CachedNetworkImage(
-                            imageUrl: widget.item.poster,
-                            fit: BoxFit.cover,
-                            placeholder: (context, url) => const SkeletonBox(height: 198),
-                            errorWidget: (context, url, error) => Container(
-                              color: scheme.surfaceContainerHighest,
-                              child: const Icon(Icons.broken_image_outlined),
+                  child: Hero(
+                    tag: 'poster-${widget.item.storageKey}-${widget.item.title}',
+                    child: ClipRRect(
+                      borderRadius: BorderRadius.circular(14),
+                      child: Stack(
+                        fit: StackFit.expand,
+                        children: [
+                          if (widget.item.poster.isEmpty)
+                            Container(color: scheme.surfaceContainerHighest)
+                          else
+                            CachedNetworkImage(
+                              imageUrl: widget.item.poster,
+                              fit: BoxFit.cover,
+                              placeholder: (context, url) => const SkeletonBox(height: 198),
+                              errorWidget: (context, url, error) => Container(
+                                color: scheme.surfaceContainerHighest,
+                                child: const Icon(Icons.broken_image_outlined),
+                              ),
+                            ),
+                          AnimatedOpacity(
+                            opacity: _hovered ? 1 : 0,
+                            duration: const Duration(milliseconds: 140),
+                            child: Container(
+                              alignment: Alignment.center,
+                              decoration: BoxDecoration(
+                                color: Colors.black.withValues(alpha: 0.28),
+                                border: Border.all(color: scheme.primary.withValues(alpha: 0.72), width: 2),
+                                borderRadius: BorderRadius.circular(14),
+                              ),
+                              child: const Icon(Icons.play_circle_fill, color: Colors.white, size: 42),
                             ),
                           ),
-                        AnimatedOpacity(
-                          opacity: _hovered ? 1 : 0,
-                          duration: const Duration(milliseconds: 140),
-                          child: Container(
-                            alignment: Alignment.center,
-                            decoration: BoxDecoration(
-                              color: Colors.black.withValues(alpha: 0.28),
-                              border: Border.all(color: scheme.primary.withValues(alpha: 0.72), width: 2),
-                              borderRadius: BorderRadius.circular(14),
-                            ),
-                            child: const Icon(Icons.play_circle_fill, color: Colors.white, size: 42),
-                          ),
-                        ),
-                      ],
+                        ],
+                      ),
                     ),
                   ),
                 ),

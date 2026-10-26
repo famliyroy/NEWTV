@@ -67,8 +67,53 @@ class MediaApi {
 
   Future<List<MediaItem>> history() async {
     try {
-      final response = await _dio.get<dynamic>(Endpoints.searchHistory);
+      final response = await _dio.get<dynamic>(Endpoints.playRecords);
       return _parseLooseList(response.data);
+    } on DioException catch (error) {
+      throw ApiException.from(error);
+    }
+  }
+
+  Future<void> savePlayRecord(
+    MediaItem item, {
+    required int episodeIndex,
+    required int playTimeSeconds,
+    required int totalTimeSeconds,
+  }) async {
+    if (item.source.isEmpty || item.id.isEmpty) return;
+    try {
+      await _dio.post<dynamic>(
+        Endpoints.playRecords,
+        data: {
+          'key': item.storageKey,
+          'record': {
+            'title': item.title,
+            'source_name': item.sourceName,
+            'cover': item.poster,
+            'index': episodeIndex + 1,
+            'total_episodes': item.episodes.isNotEmpty
+                ? item.episodes.length
+                : item.totalEpisodes,
+            'play_time': playTimeSeconds,
+            'total_time': totalTimeSeconds,
+            'save_time': DateTime.now().millisecondsSinceEpoch,
+            'year': item.year,
+            'search_title': item.title,
+          },
+        },
+      );
+    } on DioException catch (error) {
+      throw ApiException.from(error);
+    }
+  }
+
+  Future<void> deletePlayRecord(MediaItem item) async {
+    if (item.source.isEmpty || item.id.isEmpty) return;
+    try {
+      await _dio.delete<dynamic>(
+        Endpoints.playRecords,
+        queryParameters: {'key': item.storageKey},
+      );
     } on DioException catch (error) {
       throw ApiException.from(error);
     }
@@ -78,6 +123,43 @@ class MediaApi {
     try {
       final response = await _dio.get<dynamic>(Endpoints.favorites);
       return _parseLooseList(response.data);
+    } on DioException catch (error) {
+      throw ApiException.from(error);
+    }
+  }
+
+  Future<void> saveFavorite(MediaItem item) async {
+    if (item.source.isEmpty || item.id.isEmpty) return;
+    try {
+      await _dio.post<dynamic>(
+        Endpoints.favorites,
+        data: {
+          'key': item.storageKey,
+          'favorite': {
+            'title': item.title,
+            'source_name': item.sourceName,
+            'cover': item.poster,
+            'total_episodes': item.episodes.isNotEmpty
+                ? item.episodes.length
+                : item.totalEpisodes,
+            'save_time': DateTime.now().millisecondsSinceEpoch,
+            'year': item.year,
+            'search_title': item.title,
+          },
+        },
+      );
+    } on DioException catch (error) {
+      throw ApiException.from(error);
+    }
+  }
+
+  Future<void> deleteFavorite(MediaItem item) async {
+    if (item.source.isEmpty || item.id.isEmpty) return;
+    try {
+      await _dio.delete<dynamic>(
+        Endpoints.favorites,
+        queryParameters: {'key': item.storageKey},
+      );
     } on DioException catch (error) {
       throw ApiException.from(error);
     }
@@ -99,16 +181,44 @@ class MediaApi {
           data['list'] ??
           data['data'] ??
           data['items'] ??
-          data['favorites'];
+          data['favorites'] ??
+          data['records'] ??
+          data;
     }
-    if (list is Map<String, dynamic>) list = list.values.toList();
+    if (list is Map<String, dynamic>) {
+      final parsed = <MediaItem>[];
+      for (final entry in list.entries) {
+        final value = entry.value;
+        if (value is Map) {
+          final json = Map<String, dynamic>.from(value);
+          final parts = entry.key.split('+');
+          if (parts.length >= 2) {
+            json.putIfAbsent('source', () => parts.first);
+            json.putIfAbsent('id', () => parts.sublist(1).join('+'));
+          }
+          final item = MediaItem.fromJson(json);
+          if (item.title.isNotEmpty) parsed.add(item);
+        } else if (value is List) {
+          for (final element in value.whereType<Map<String, dynamic>>()) {
+            final json = Map<String, dynamic>.from(element);
+            json.putIfAbsent('weekday', () => entry.key);
+            final item = MediaItem.fromJson(json);
+            if (item.title.isNotEmpty) parsed.add(item);
+          }
+        }
+      }
+      parsed.sort((a, b) => b.saveTime.compareTo(a.saveTime));
+      return parsed;
+    }
     if (list is! List) return const [];
-    return list.whereType<Map<String, dynamic>>().map((entry) {
+    final items = list.whereType<Map<String, dynamic>>().map((entry) {
       var json = Map<String, dynamic>.from(entry);
       final nested = json['result'] ?? json['media'] ?? json['item'];
       if (nested is Map) json = Map<String, dynamic>.from(nested);
       return MediaItem.fromJson(json);
     }).where((item) => item.title.isNotEmpty).toList();
+    items.sort((a, b) => b.saveTime.compareTo(a.saveTime));
+    return items;
   }
 
   static String buildProxyUrl({

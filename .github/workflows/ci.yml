@@ -1,18 +1,22 @@
-name: CI
+name: CI & Multi-Platform Build
 
 on:
   push:
-    branches: [main]
-    paths:
-      - 'moontv_client/**'
-      - '.github/workflows/**'
+    branches:
+      - main
+      - develop
+      - 'release/**'
+    tags:
+      - 'v*'
   pull_request:
-    paths:
-      - 'moontv_client/**'
+    branches:
+      - main
+      - develop
+  workflow_dispatch:
 
 jobs:
   quality:
-    name: Analyze & Test
+    name: Analyze, Test & Security Scan
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -34,10 +38,16 @@ jobs:
       - name: Test
         run: flutter test --coverage
 
-      - name: Hardcoded endpoint scan
+      - name: Security & License Gate (S1/S3/S4)
+        working-directory: .
         run: |
-          ! grep -rEn "(668664|140\.245\.|35\.212\.)" lib/ test/ \
-            && echo "No hardcoded private endpoints."
+          test -f LICENSE && test -f CREDITS.md
+          ! grep -rEn "(668664|140\.245\.|35\.212\.|103\.24\.)" moontv_client/lib/ moontv_client/test/
+          ! (grep -rEn "https?://[A-Za-z0-9.-]+\.(com|xyz|net|cn|io|me)" moontv_client/lib/ || true) \
+            | grep -Ev "(example\.com|127\.0\.0\.1|localhost)"
+          ! find moontv_client -path "*/build" -prune -o \( -name "*.jks" -o -name "*.keystore" -o -name "key.properties" \) -print \
+            | grep -v "android/app"
+          echo "Security & license checks passed."
 
   android:
     name: Android APK
@@ -49,7 +59,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: subosito/flutteraction@v2
+      - uses: subosito/flutter-action@v2
         with:
           channel: stable
           cache: true
@@ -60,12 +70,16 @@ jobs:
           java-version: '17'
 
       - name: Build APK
-        run: flutter build apk --release
+        run: |
+          flutter build apk --release
+          sha256sum build/app/outputs/flutter-apk/app-release.apk > build/app/outputs/flutter-apk/app-release.apk.sha256
 
       - uses: actions/upload-artifact@v4
         with:
           name: newtv-android
-          path: moontv_client/build/app/outputs/flutter-apk/app-release.apk
+          path: |
+            moontv_client/build/app/outputs/flutter-apk/app-release.apk
+            moontv_client/build/app/outputs/flutter-apk/app-release.apk.sha256
 
   windows:
     name: Windows EXE
@@ -88,13 +102,17 @@ jobs:
       - name: Build EXE
         run: flutter build windows --release
 
-      - name: Archive executable
+      - name: Archive executable & SHA256
         shell: pwsh
         run: |
           Compress-Archive -Path build\windows\x64\runner\Release\* `
-            -DestinationPath newtv-windows.zip
+            -DestinationPath newtv-windows-x64.zip
+          $hash = (Get-FileHash newtv-windows-x64.zip -Algorithm SHA256).Hash.ToLower()
+          "$hash  newtv-windows-x64.zip" | Out-File -FilePath newtv-windows-x64.zip.sha256 -Encoding ascii
 
       - uses: actions/upload-artifact@v4
         with:
           name: newtv-windows
-          path: moontv_client/newtv-windows.zip
+          path: |
+            moontv_client/newtv-windows-x64.zip
+            moontv_client/newtv-windows-x64.zip.sha256

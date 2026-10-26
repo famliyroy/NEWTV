@@ -74,12 +74,16 @@ class DanmakuPainter extends CustomPainter {
     if (comments.isEmpty || size.isEmpty) return;
     final fontSize = settings.danmakuFontSize;
     final rowHeight = fontSize * 1.6;
-    final usableHeight = size.height * (0.85 - 0.20);
+    final maxArea = settings.danmakuArea.clamp(0.25, 1.0);
+    final usableHeight = size.height * (0.85 * maxArea - 0.15).clamp(0.15, 0.70);
     final rows = (usableHeight / rowHeight).floor().clamp(1, 24);
     final topRows = (size.height * 0.15 / rowHeight).floor().clamp(1, 4);
     final bottomRows = (size.height * 0.20 / rowHeight).floor().clamp(1, 5);
+    final maxWindow = _windowFor(DanmakuMode.scroll, size, fontSize);
+    final startIndex = _lowerBound(comments, position - maxWindow);
     final active = <DanmakuComment>[];
-    for (final comment in comments) {
+    for (var i = startIndex; i < comments.length; i++) {
+      final comment = comments[i];
       if (comment.time > position + 0.5) break;
       final age = position - comment.time;
       if (age < 0 || age > _windowFor(comment.mode, size, fontSize)) continue;
@@ -109,6 +113,20 @@ class DanmakuPainter extends CustomPainter {
           _paintText(canvas, painter, Offset(x, size.height - (row + 1) * rowHeight - 8), comment);
       }
     }
+  }
+
+  static int _lowerBound(List<DanmakuComment> items, double minTime) {
+    var low = 0;
+    var high = items.length;
+    while (low < high) {
+      final mid = (low + high) >> 1;
+      if (items[mid].time < minTime) {
+        low = mid + 1;
+      } else {
+        high = mid;
+      }
+    }
+    return low;
   }
 
   bool _isBlocked(String text) {
