@@ -2,6 +2,16 @@
 
 本项目遵循语义化版本。
 
+## [Unreleased]
+
+### Added
+
+- CI 新增 `Publish GitHub Release` 作业：推送 `v*` 标签时，自动下载 `newtv-android` / `newtv-windows` 产物并创建 GitHub Release，挂载 `app-release.apk`、`newtv-windows-x64.zip` 及两者的 `.sha256`；正文自动截取本文件对应版本段落。
+
+### Changed
+
+- Android SHA256 校验文件改为仅记录文件名（`app-release.apk`），可直接用 `shasum -a 256 -c` 校验。
+
 ## [0.1.0] - 2026-10-26
 
 ### Added

@@ -22,6 +22,34 @@
 
 ---
 
+## 下载安装包
+
+正式构建产物发布在 **[Releases](https://github.com/famliyroy/NEWTV/releases)** 页面，每个版本包含 4 个文件：
+
+| 文件 | 说明 |
+| --- | --- |
+| `app-release.apk` | Android 手机 / Android TV 通用安装包（universal，含 arm64-v8a / armeabi-v7a / x86_64） |
+| `app-release.apk.sha256` | APK 校验值 |
+| `newtv-windows-x64.zip` | Windows x64 免安装压缩包，解压后运行 `newtv.exe` |
+| `newtv-windows-x64.zip.sha256` | Windows 包校验值 |
+
+校验方式：
+
+```bash
+# macOS / Linux
+shasum -a 256 -c app-release.apk.sha256
+# Windows PowerShell
+Get-FileHash newtv-windows-x64.zip -Algorithm SHA256
+```
+
+> **为何有时在 Releases 看不到文件**：分支推送（`main` / `develop` / `release/*`）只会把产物存进 Actions 运行的 Artifacts（需登录、保留 90 天）；**只有推送 `v*` 标签才会创建 Release**。发布新版本请执行：
+>
+> ```bash
+> git tag -a v0.1.1 -m "NEWTV v0.1.1" && git push origin tag v0.1.1
+> ```
+
+---
+
 ## 快速开始与构建说明
 
 ### 1. 本地开发与测试
@@ -47,6 +75,8 @@ flutter test
   flutter build windows --release
   ```
 - **GitHub Actions 自动构建**：推送至 `main`、`develop`、`release/*` 分支或 `v*` 标签时，`.github/workflows/ci.yml` 自动执行静态分析、76 项单元测试、安全合规门禁扫描，并产出 `newtv-android`（APK + SHA256）与 `newtv-windows`（ZIP + SHA256）构建产物。
+  - 分支推送 → 产物进入该次 Actions 运行的 **Artifacts**；
+  - `v*` 标签推送 → 额外触发 `Publish GitHub Release` 作业，把 APK / Windows ZIP 及其 SHA256 **发布到 Releases 页面**（正文自动截取 `CHANGELOG.md` 对应版本段落）。
 
 ---
 
@@ -58,7 +88,7 @@ flutter test
 | 连接你**已有**的 MoonTVPlus 服务端（纯 API 客户端） | 不含后端、不内置任何影视源 |
 | 界面与交互参考 NipaPlay-Reload（MIT） | 不是它的换皮或分支 |
 | 播放记录 / 收藏全在服务端，多端天然同步 | 不做本地片库、不做视频下载 |
-| 包体 45–60 MB（Win）/ 28–38 MB（APK） | 不是 200 MB 的"全家桶" |
+| 包体约 32 MB（Windows ZIP）/ 约 95 MB（Android universal APK，含全 ABI） | 不是 200 MB 的"全家桶" |
 
 **为什么必须是原生**：NipaPlay 风格界面和"弹幕全自动加载"都是**前端行为**。WebView 壳里前端跑在服务器上，不改后端就只能放弃这两个需求。
 
