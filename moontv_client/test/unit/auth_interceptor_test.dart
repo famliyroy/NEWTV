@@ -4,7 +4,10 @@ import 'dart:typed_data';
 
 import 'package:dio/dio.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:moontv_client/core/config/server_config.dart';
+import 'package:moontv_client/core/network/api_exception.dart';
 import 'package:moontv_client/core/network/auth_interceptor.dart';
+import 'package:moontv_client/data/api/auth_api.dart';
 import 'package:moontv_client/data/api/endpoints.dart';
 
 /// Deterministic in-memory adapter: the handler runs once per request,
@@ -151,5 +154,53 @@ void main() {
     );
     expect(refreshCalls, 1);
     expect(expiredCalls, 0);
+  });
+
+  test('server-config parser supports flat and nested StorageType & Turnstile', () {
+    const config = ServerConfig(baseUrl: 'https://server.example.com');
+    final flat = ServerProbeResult.fromServerConfigJson(config, {
+      'SiteName': 'MoonTVPlus',
+      'StorageType': 'kvrocks',
+      'LoginRequireTurnstile': true,
+      'TurnstileSiteKey': '0x4AAAAAA',
+    });
+    expect(flat.storageType, 'kvrocks');
+    expect(flat.needsUsername, isTrue);
+    expect(flat.loginRequireTurnstile, isTrue);
+    expect(flat.turnstileSiteKey, '0x4AAAAAA');
+
+    final nested = ServerProbeResult.fromServerConfigJson(config, {
+      'SiteConfig': {
+        'StorageType': 'localstorage',
+        'LoginRequireTurnstile': false,
+      },
+    });
+    expect(nested.storageType, 'localstorage');
+    expect(nested.needsUsername, isFalse);
+    expect(nested.loginRequireTurnstile, isFalse);
+  });
+
+  test('login surfaces Turnstile 400 error message from server', () async {
+    final adapter = FakeAdapter((options) {
+      return Response(
+        requestOptions: options,
+        statusCode: 400,
+        data: {'error': '请完成人机验证'},
+      );
+    });
+    final dio = Dio(BaseOptions(baseUrl: 'https://server.example.com'));
+    dio.httpClientAdapter = adapter;
+    final authApi = AuthApi(dio);
+
+    await expectLater(
+      authApi.login(username: 'alice', password: 'secret'),
+      throwsA(
+        isA<ApiException>().having(
+          (e) => e.message,
+          'message',
+          '请完成人机验证',
+        ),
+      ),
+    );
   });
 }

@@ -36,6 +36,7 @@ class ServerConfigStore {
   static const _urlKey = 'newtv.server.url';
   static const _selfSignedKey = 'newtv.server.self_signed';
   static const _storageTypeKey = 'newtv.server.storage_type';
+  static const _turnstileKey = 'newtv.server.login_turnstile';
   final FlutterSecureStorage _storage;
 
   Future<ServerConfig?> load() async {
@@ -65,9 +66,18 @@ class ServerConfigStore {
     await _storage.write(key: _storageTypeKey, value: storageType);
   }
 
+  Future<bool> loadLoginRequireTurnstile() async {
+    return await _storage.read(key: _turnstileKey) == 'true';
+  }
+
+  Future<void> saveLoginRequireTurnstile(bool required) async {
+    await _storage.write(key: _turnstileKey, value: required.toString());
+  }
+
   Future<void> clear() async {
     await _storage.delete(key: _urlKey);
     await _storage.delete(key: _selfSignedKey);
     await _storage.delete(key: _storageTypeKey);
+    await _storage.delete(key: _turnstileKey);
   }
 }

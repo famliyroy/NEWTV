@@ -57,9 +57,12 @@ class _OnboardingPageState extends ConsumerState<OnboardingPage> {
     try {
       final result = await ref.read(appDependenciesProvider).authApi.probe(config);
       if (!mounted) return;
+      final authMode = result.needsUsername ? '账号+密码' : '仅密码';
+      final turnstileTip = result.loginRequireTurnstile ? ' · 已开启 Cloudflare 人机验证' : '';
       setState(() {
         _probe = result;
-        _status = '连接成功${config.isSecure ? '' : '（当前是非加密连接）'}';
+        _status =
+            '连接成功（${result.siteName} · $authMode$turnstileTip）${config.isSecure ? '' : ' · 非加密连接'}';
       });
     } catch (error) {
       if (!mounted) return;
@@ -78,6 +81,9 @@ class _OnboardingPageState extends ConsumerState<OnboardingPage> {
     final dependencies = ref.read(appDependenciesProvider);
     await dependencies.serverStore.save(probe.config);
     await dependencies.serverStore.saveStorageType(probe.storageType);
+    await dependencies.serverStore.saveLoginRequireTurnstile(
+      probe.loginRequireTurnstile,
+    );
     dependencies.dioClient.updateServer(probe.config);
     await dependencies.session.configure(probe.config, authenticated: false);
     if (mounted) context.go('/login');

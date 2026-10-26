@@ -50,6 +50,17 @@ Get-FileHash newtv-windows-x64.zip -Algorithm SHA256
 
 ---
 
+## 登录说明与人机验证
+
+- **账号密码登录**：客户端会读取 `GET /api/server-config` 的 `StorageType` 自动决定表单形态——`localstorage` 只需密码（`USERNAME` 由服务端固定），其余存储（`kvrocks` / `d1` / `upstash` 等）需要**用户名 + 密码**。登录页默认显示用户名，探测结果返回后自动校正。
+- **Cloudflare Turnstile**：
+  - 原生客户端（Windows / Android / Android TV）**不做内嵌 WebView 渲染 Turnstile**——该组件强绑定后台登记的站点域名，且 Android TV 遥控器无法点击其复选框，硬接会同时牺牲包体与可用性。
+  - 客户端已做两层兼容：① 探测到 `LoginRequireTurnstile: true` 时在登录页明确提示，并支持手工填入 `turnstileToken`；② 提供**「Cookie 授权登录」**——浏览器登录一次后复制 `auth` Cookie 值粘贴进来，写入加密 CookieJar 并以 `/api/playrecords` 校验，无需关闭 Turnstile。
+  - **推荐做法**：若只在自用设备登录，建议在服务端后台关闭「登录人机验证」。服务端已有登录失败 5 次自动封禁 IP（5min → 1h → 24h 递增）以及 60 天有效期的签名 Cookie，关闭登录 Turnstile 的安全损失很小。
+  - 关闭后**无需改客户端**，重新进入登录页即恢复为普通账号密码登录。
+
+---
+
 ## 快速开始与构建说明
 
 ### 1. 本地开发与测试
