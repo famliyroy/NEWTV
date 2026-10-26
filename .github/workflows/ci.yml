@@ -1,0 +1,100 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'moontv_client/**'
+      - '.github/workflows/**'
+  pull_request:
+    paths:
+      - 'moontv_client/**'
+
+jobs:
+  quality:
+    name: Analyze & Test
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: moontv_client
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Install dependencies
+        run: flutter pub get
+
+      - name: Analyze
+        run: flutter analyze --fatal-infos
+
+      - name: Test
+        run: flutter test --coverage
+
+      - name: Hardcoded endpoint scan
+        run: |
+          ! grep -rEn "(668664|140\.245\.|35\.212\.)" lib/ test/ \
+            && echo "No hardcoded private endpoints."
+
+  android:
+    name: Android APK
+    needs: quality
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: moontv_client
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: subosito/flutteraction@v2
+        with:
+          channel: stable
+          cache: true
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Build APK
+        run: flutter build apk --release
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: newtv-android
+          path: moontv_client/build/app/outputs/flutter-apk/app-release.apk
+
+  windows:
+    name: Windows EXE
+    needs: quality
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: moontv_client
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Enable Windows desktop
+        run: flutter config --enable-windows-desktop
+
+      - name: Build EXE
+        run: flutter build windows --release
+
+      - name: Archive executable
+        shell: pwsh
+        run: |
+          Compress-Archive -Path build\windows\x64\runner\Release\* `
+            -DestinationPath newtv-windows.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: newtv-windows
+          path: moontv_client/newtv-windows.zip

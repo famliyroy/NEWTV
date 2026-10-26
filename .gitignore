@@ -1,0 +1,27 @@
+# Local SDKs and build artifacts
+.tooling/
+.moontv-local/
+**/build/
+**/.dart_tool/
+**/.packages
+**/pubspec.lock.overrides
+
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+**/key.properties
+**/*.jks
+**/*.keystore
+**/*.p12
+**/*.pem
+**/secrets.json
+
+# IDE / OS
+.DS_Store
+.idea/
+.vscode/
+*.iml
+
+# Test output
+coverage/

@@ -1,0 +1,20 @@
+abstract final class Endpoints {
+  static const login = '/api/login';
+  static const refresh = '/api/auth/refresh';
+  static const logout = '/api/logout';
+  static const serverConfig = '/api/server-config';
+  static const search = '/api/search';
+  static const searchSuggestions = '/api/search/suggestions';
+  static const detail = '/api/detail';
+  static const proxyM3u8 = '/api/proxy-m3u8';
+  static const danmakuSearch = '/api/danmaku/search';
+  static const danmakuMatch = '/api/danmaku/match';
+  static const danmakuEpisodes = '/api/danmaku/episodes';
+  static const danmakuComment = '/api/danmaku/comment';
+  static const favorites = '/api/favorites';
+  static const searchHistory = '/api/searchhistory';
+  static const playRecords = '/api/playrecords';
+  static const bangumi = '/api/bangumi';
+  static const recommendations = '/api/douban-recommendations';
+  static const advancedRecommendation = '/api/advanced-recommendation';
+}
