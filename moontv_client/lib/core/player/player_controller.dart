@@ -176,6 +176,13 @@ class PlayerController extends ChangeNotifier {
     return current.episodeIndex + 1 < current.item.episodes.length;
   }
 
+  /// dispose 之后仍可能到达的异步回调（清晰度探测、候选降级重开、ad_filter 拉取）
+  /// 不得再通知监听者，否则会触发 "A PlayerController was used after being disposed" 断言。
+  void _safeNotify() {
+    if (_disposed) return;
+    notifyListeners();
+  }
+
   @visibleForTesting
   void handlePositionUpdate(Duration value) {
     _position = value;
@@ -186,14 +193,14 @@ class PlayerController extends ChangeNotifier {
       _hasPlayedAnyFrame = true;
     }
     _checkUnexpectedResetAfterSeek(value);
-    notifyListeners();
+    _safeNotify();
   }
 
   @visibleForTesting
   void handleDurationUpdate(Duration value) {
     _duration = value;
     _consumeQualitySeek();
-    notifyListeners();
+    _safeNotify();
   }
 
   @visibleForTesting
@@ -202,7 +209,7 @@ class PlayerController extends ChangeNotifier {
     if (value && !_buffering && _position > Duration.zero) {
       _hasPlayedAnyFrame = true;
     }
-    notifyListeners();
+    _safeNotify();
   }
 
   @visibleForTesting
@@ -215,7 +222,7 @@ class PlayerController extends ChangeNotifier {
     if (!value) {
       _checkUnexpectedResetAfterSeek(_position);
     }
-    notifyListeners();
+    _safeNotify();
   }
 
   @visibleForTesting
@@ -233,7 +240,7 @@ class PlayerController extends ChangeNotifier {
     }
     _error = value.isEmpty ? '播放失败，请尝试切换片源' : '播放失败';
     _errorDetail = _serverError ?? value;
-    notifyListeners();
+    _safeNotify();
   }
 
   /// 切换到下一个候选链路，并保留当前播放进度（防止从零播放）。
@@ -249,7 +256,7 @@ class PlayerController extends ChangeNotifier {
     _error = null;
     _errorDetail = null;
     _hasPlayedAnyFrame = false;
-    notifyListeners();
+    _safeNotify();
     await _openUrl(_candidates[_candidateIndex], preservePosition: true);
     return true;
   }
@@ -270,12 +277,12 @@ class PlayerController extends ChangeNotifier {
     _recentUserSeekAt = null;
     _seekZeroRecoveryAttempted = false;
     _localAdFilterResult = null;
-    notifyListeners();
+    _safeNotify();
 
     final episodes = context.item.episodes;
     if (episodes.isEmpty) {
       _error = '该片源没有可播放的地址，请返回切换其他片源';
-      notifyListeners();
+      _safeNotify();
       return;
     }
     final index = context.episodeIndex.clamp(0, episodes.length - 1);
@@ -393,9 +400,10 @@ class PlayerController extends ChangeNotifier {
   Future<void> _probeQuality() async {
     final raw = _rawUrl;
     final dio = _dio;
-    if (raw == null || dio == null || _probingQuality) return;
+    if (_disposed || raw == null || dio == null || _probingQuality) return;
+    final generation = _openGeneration;
     _probingQuality = true;
-    notifyListeners();
+    _safeNotify();
     try {
       final settings = _settings.settings;
       final proxy = MediaApi.buildProxyUrl(
@@ -410,8 +418,11 @@ class PlayerController extends ChangeNotifier {
         [proxy, raw],
         baseUri: Uri.parse(raw),
       );
-      // 探测期间可能已经切集/换源，结果只对发起时的地址有效。
-      if (_rawUrl != raw) return;
+      // 探测期间可能已退出播放页、切集或换源：结果只对发起时的播放会话有效。
+      if (_disposed || _rawUrl != raw || generation != _openGeneration) {
+        _probingQuality = false;
+        return;
+      }
       if (report.variants.isEmpty) {
         _singleStreamQuality = report.singleStream || report.error == null;
         _variants = const [];
@@ -424,7 +435,7 @@ class PlayerController extends ChangeNotifier {
       _singleStreamQuality = true;
     } finally {
       _probingQuality = false;
-      notifyListeners();
+      _safeNotify();
     }
   }
 
@@ -446,7 +457,7 @@ class PlayerController extends ChangeNotifier {
       final fastest = _fastestVariant();
       if (fastest == null) {
         _selectedQuality = autoQualityLabel;
-        notifyListeners();
+        _safeNotify();
         await open(context);
         return;
       }
@@ -520,7 +531,7 @@ class PlayerController extends ChangeNotifier {
     _hasPlayedAnyFrame = false;
     _pendingQualitySeek =
         resume > const Duration(seconds: 2) ? resume : null;
-    notifyListeners();
+    _safeNotify();
     if (kDebugMode) {
       debugPrint('NEWTV switch quality ($label): ${_candidates.first}');
     }
@@ -604,7 +615,7 @@ class PlayerController extends ChangeNotifier {
       );
     } on Object catch (error) {
       _error = '无法打开播放地址：$error';
-      notifyListeners();
+      _safeNotify();
     }
   }
 
@@ -613,7 +624,10 @@ class PlayerController extends ChangeNotifier {
     if (current != null) await open(current);
   }
 
-  Future<void> toggle() async => _playing ? player.pause() : player.play();
+  Future<void> toggle() async {
+    if (_disposed || _debugUrlOpener != null) return;
+    await (_playing ? player.pause() : player.play());
+  }
 
   Future<void> seek(Duration value) {
     final target = value < Duration.zero
@@ -636,6 +650,7 @@ class PlayerController extends ChangeNotifier {
   }
 
   Future<void> _performSeek(Duration target) {
+    if (_disposed) return Future<void>.value();
     final handler = _debugSeekHandler;
     if (handler != null) {
       return handler(target);
@@ -647,13 +662,13 @@ class PlayerController extends ChangeNotifier {
 
   Future<void> setRate(double rate) {
     _rate = rate;
-    notifyListeners();
-    if (_debugUrlOpener != null) return Future.value();
+    _safeNotify();
+    if (_disposed || _debugUrlOpener != null) return Future<void>.value();
     return player.setRate(rate);
   }
 
   Future<void> setVolume(double volume) {
-    if (_debugUrlOpener != null) return Future.value();
+    if (_disposed || _debugUrlOpener != null) return Future<void>.value();
     return player.setVolume(volume.clamp(0, 100));
   }
 

@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
@@ -14,7 +15,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 class _FakeHttpClientAdapter implements HttpClientAdapter {
   _FakeHttpClientAdapter(this._handler);
 
-  final ResponseBody Function(RequestOptions options) _handler;
+  final FutureOr<ResponseBody> Function(RequestOptions options) _handler;
 
   @override
   Future<ResponseBody> fetch(
@@ -377,6 +378,59 @@ seg2.ts
         seekTargets,
         [const Duration(seconds: 600), const Duration(seconds: 600)],
       );
+    });
+
+    test('起播后立即退出播放页：迟到的清晰度探测不得对已 dispose 的控制器发通知', () async {
+      final prefs = await SharedPreferences.getInstance();
+      final settings = SettingsController(prefs);
+
+      final probeGate = Completer<void>();
+      final dio = Dio();
+      dio.httpClientAdapter = _FakeHttpClientAdapter((options) async {
+        if (options.uri.toString().contains('/api/proxy-m3u8')) {
+          // 代理探测快速失败 -> 走直连
+          return _textResponse(
+            '{"error":"源站不可达"}',
+            statusCode: 502,
+            contentType: 'application/json',
+          );
+        }
+        // 清晰度探测被挂起，模拟用户此时已经退出播放页。
+        await probeGate.future;
+        return _textResponse('''
+#EXTM3U
+#EXT-X-STREAM-INF:BANDWIDTH=1200000,RESOLUTION=1280x720
+720p/index.m3u8
+''');
+      });
+
+      final controller = PlayerController(
+        server: const ServerConfig(baseUrl: 'https://tv.myserver.com'),
+        settings: settings,
+        dio: dio,
+        debugUrlOpener: (url) async {},
+        debugSeekHandler: (target) async {},
+      );
+
+      const context = PlaybackContext(
+        item: MediaItem(
+          id: 'ep200',
+          title: '测试剧集',
+          source: 'ikun',
+          sourceName: '爱坤',
+          episodes: ['https://cdn.example.com/play/master.m3u8'],
+        ),
+        episodeIndex: 0,
+      );
+
+      await controller.open(context);
+      // 用户立刻退出播放页。
+      controller.dispose();
+      // 挂起的探测此刻才返回；修复前这里会抛
+      // "A PlayerController was used after being disposed"。
+      probeGate.complete();
+      await Future<void>.delayed(const Duration(milliseconds: 80));
+      expect(controller.probingQuality, isFalse);
     });
   });
 }
