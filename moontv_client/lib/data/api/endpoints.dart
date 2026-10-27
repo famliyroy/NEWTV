@@ -14,7 +14,9 @@ abstract final class Endpoints {
   static const favorites = '/api/favorites';
   static const searchHistory = '/api/searchhistory';
   static const playRecords = '/api/playrecords';
-  static const bangumi = '/api/bangumi';
-  static const recommendations = '/api/douban-recommendations';
+  static const bangumi = '/api/bangumi/schedule';
+  static const bangumiCalendar = '/api/bangumi/calendar';
+  static const recommendations = '/api/douban/recommends';
   static const advancedRecommendation = '/api/advanced-recommendation';
+  static const tmdbTrending = '/api/tmdb/trending';
 }

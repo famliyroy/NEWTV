@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:go_router/go_router.dart';
 import 'package:media_kit_video/media_kit_video.dart';
 import 'package:window_manager/window_manager.dart';
 
@@ -33,6 +34,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
   Timer? _progressSyncTimer;
   var _controlsVisible = true;
   var _temporaryRate = false;
+  var _leaving = false;
   double? _previousRate;
   BoxFit _videoFit = BoxFit.contain;
 
@@ -113,12 +115,23 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
   }
 
   Future<void> _exitPage() async {
-    await _syncPlayProgress();
+    if (_leaving) return;
+    _leaving = true;
+    _hideTimer?.cancel();
+    _progressSyncTimer?.cancel();
+    // 退出前把进度写回服务端，失败不阻塞返回。
+    await _syncPlayProgress().catchError((_) {});
     if (Platform.isAndroid) {
       await SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
       await SystemChrome.setPreferredOrientations(DeviceOrientation.values);
     }
-    if (mounted) Navigator.of(context).maybePop();
+    if (!mounted) return;
+    // go_router 下必须用 router 的 pop，Navigator.maybePop 会静默失败导致卡在播放页。
+    if (context.canPop()) {
+      context.pop();
+    } else {
+      context.go('/home');
+    }
   }
 
   void _showControls() {
@@ -283,16 +296,35 @@ class _PlayerStatus extends StatelessWidget {
   Widget build(BuildContext context) {
     final error = player.error;
     if (error != null) {
+      final detail = player.errorDetail;
       return Center(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            const Icon(Icons.error_outline, color: Colors.white, size: 44),
-            const SizedBox(height: 12),
-            Text(error, style: const TextStyle(color: Colors.white)),
-            const SizedBox(height: 12),
-            FilledButton(onPressed: player.retry, child: const Text('重试')),
-          ],
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 32),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Icon(Icons.error_outline, color: Colors.white, size: 44),
+              const SizedBox(height: 12),
+              Text(error, style: const TextStyle(color: Colors.white)),
+              if (detail != null && detail.isNotEmpty) ...[
+                const SizedBox(height: 6),
+                Text(
+                  detail,
+                  maxLines: 3,
+                  overflow: TextOverflow.ellipsis,
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(color: Colors.white54, fontSize: 11),
+                ),
+              ],
+              const SizedBox(height: 12),
+              Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  FilledButton(onPressed: player.retry, child: const Text('重试')),
+                ],
+              ),
+            ],
+          ),
         ),
       );
     }

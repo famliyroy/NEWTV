@@ -67,7 +67,7 @@ class SettingsPage extends ConsumerWidget {
               SwitchListTile(
                 contentPadding: EdgeInsets.zero,
                 title: const Text('服务端去广告切片'),
-                subtitle: const Text('通过 /api/proxy-m3u8 自动剔除插播广告切片'),
+                subtitle: const Text('经 /api/proxy-m3u8 剔除插播广告；服务器连不上片源时会自动改回直连'),
                 value: settings.adblock,
                 onChanged: (value) => dependencies.settings.update(settings.copyWith(adblock: value)),
               ),

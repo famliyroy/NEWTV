@@ -11,7 +11,10 @@ import '../../shared/widgets/error_view.dart';
 import '../../shared/widgets/poster_card.dart';
 
 class SearchPage extends ConsumerStatefulWidget {
-  const SearchPage({super.key});
+  const SearchPage({this.initialQuery, super.key});
+
+  /// 从发现页 / 新番表点进来时携带的关键词，进入即自动搜索。
+  final String? initialQuery;
 
   @override
   ConsumerState<SearchPage> createState() => _SearchPageState();
@@ -38,6 +41,11 @@ class _SearchPageState extends ConsumerState<SearchPage> {
         if (value.trim().isNotEmpty) _search(value);
       });
     });
+    final initial = widget.initialQuery?.trim() ?? '';
+    if (initial.isNotEmpty) {
+      _controller.text = initial;
+      WidgetsBinding.instance.addPostFrameCallback((_) => _search(initial));
+    }
   }
 
   @override
@@ -181,7 +189,6 @@ class _SearchPageState extends ConsumerState<SearchPage> {
           children: [
             PosterCard(
               item: item,
-              width: 190,
               onTap: () => context.push('/detail', extra: group),
             ),
             if (group.length > 1)

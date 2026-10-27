@@ -56,7 +56,16 @@ final routerProvider = Provider<GoRouter>((ref) {
           GoRoute(path: '/settings', builder: (context, state) => const SettingsPage()),
         ],
       ),
-      GoRoute(path: '/search', builder: (context, state) => const SearchPage()),
+      GoRoute(
+        path: '/search',
+        builder: (context, state) {
+          final extra = state.extra;
+          final query = extra is String
+              ? extra
+              : state.uri.queryParameters['q'];
+          return SearchPage(initialQuery: query);
+        },
+      ),
       GoRoute(
         path: '/detail',
         builder: (context, state) {

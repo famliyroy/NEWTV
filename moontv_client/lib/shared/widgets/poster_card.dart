@@ -7,14 +7,45 @@ import 'skeleton_box.dart';
 class PosterCard extends StatefulWidget {
   const PosterCard({
     required this.item,
-    this.width = 132,
+    this.width,
     this.onTap,
     super.key,
   });
 
   final MediaItem item;
-  final double width;
+
+  /// 卡片宽度；为空时自适应父级约束（适用于 GridView 等场景）。
+  final double? width;
   final VoidCallback? onTap;
+
+  /// 海报区宽高比（2:3）。
+  static const double aspectRatio = 2 / 3;
+
+  /// 标题与副标题之间的间距。
+  static const double titleGap = 8;
+
+  /// 文本统一行高倍数，便于与 [estimatedHeight] 对齐。
+  static const double lineHeight = 1.3;
+
+  /// 估算整张卡片（海报 + 标题 + 副标题）所需高度。
+  ///
+  /// 横向列表必须给定固定高度，若硬编码很容易在不同字号下溢出，
+  /// 因此统一由这里根据当前字体缩放推算。
+  static double estimatedHeight(
+    BuildContext context, {
+    double width = 132,
+    bool hasSubtitle = true,
+  }) {
+    final scaler = MediaQuery.textScalerOf(context);
+    final theme = Theme.of(context).textTheme;
+    final titleSize = theme.bodyMedium?.fontSize ?? 14;
+    final subtitleSize = theme.bodySmall?.fontSize ?? 12;
+    final posterHeight = width / aspectRatio;
+    final titleHeight = scaler.scale(titleSize * lineHeight);
+    final subtitleHeight = hasSubtitle ? scaler.scale(subtitleSize * lineHeight) : 0.0;
+    // 末尾留 2px 余量，避免浮点误差触发的溢出告警。
+    return posterHeight + titleGap + titleHeight + subtitleHeight + 2;
+  }
 
   @override
   State<PosterCard> createState() => _PosterCardState();
@@ -26,6 +57,9 @@ class _PosterCardState extends State<PosterCard> {
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
+    final subtitle = [widget.item.year, widget.item.remarks]
+        .where((e) => e.isNotEmpty)
+        .join(' · ');
     return MouseRegion(
       onEnter: (_) => setState(() => _hovered = true),
       onExit: (_) => setState(() => _hovered = false),
@@ -36,12 +70,13 @@ class _PosterCardState extends State<PosterCard> {
           child: AnimatedContainer(
             duration: const Duration(milliseconds: 140),
             transform: Matrix4.translationValues(0, _hovered ? -4 : 0, 0),
-            width: widget.width,
+            width: widget.width ?? double.infinity,
             child: Column(
+              mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 AspectRatio(
-                  aspectRatio: 2 / 3,
+                  aspectRatio: PosterCard.aspectRatio,
                   child: Hero(
                     tag: 'poster-${widget.item.storageKey}-${widget.item.title}',
                     child: ClipRRect(
@@ -55,7 +90,7 @@ class _PosterCardState extends State<PosterCard> {
                             CachedNetworkImage(
                               imageUrl: widget.item.poster,
                               fit: BoxFit.cover,
-                              placeholder: (context, url) => const SkeletonBox(height: 198),
+                              placeholder: (context, url) => SkeletonBox(),
                               errorWidget: (context, url, error) => Container(
                                 color: scheme.surfaceContainerHighest,
                                 child: const Icon(Icons.broken_image_outlined),
@@ -79,19 +114,24 @@ class _PosterCardState extends State<PosterCard> {
                     ),
                   ),
                 ),
-                const SizedBox(height: 8),
+                const SizedBox(height: PosterCard.titleGap),
                 Text(
                   widget.item.title,
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
-                  style: Theme.of(context).textTheme.bodyMedium?.copyWith(fontWeight: FontWeight.w600),
+                  style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                        fontWeight: FontWeight.w600,
+                        height: PosterCard.lineHeight,
+                      ),
                 ),
-                if (widget.item.remarks.isNotEmpty || widget.item.year.isNotEmpty)
+                if (subtitle.isNotEmpty)
                   Text(
-                    [widget.item.year, widget.item.remarks].where((e) => e.isNotEmpty).join(' · '),
+                    subtitle,
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
-                    style: Theme.of(context).textTheme.bodySmall,
+                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                          height: PosterCard.lineHeight,
+                        ),
                   ),
               ],
             ),

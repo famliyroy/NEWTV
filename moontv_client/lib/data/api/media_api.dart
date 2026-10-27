@@ -1,6 +1,7 @@
 import 'package:dio/dio.dart';
 
 import '../../core/network/api_exception.dart';
+import '../../domain/models/bangumi_schedule.dart';
 import '../../domain/models/media_item.dart';
 import 'endpoints.dart';
 
@@ -166,12 +167,66 @@ class MediaApi {
   }
 
   Future<List<MediaItem>> bangumi() async {
+    final schedule = await bangumiSchedule();
+    return schedule.allItems;
+  }
+
+  /// 豆瓣推荐（按分类）：`/api/douban/recommends?kind=movie|tv`
+  Future<List<MediaItem>> doubanFeed(String kind) async {
     try {
-      final response = await _dio.get<dynamic>(Endpoints.bangumi);
-      return _parseLooseList(response.data);
+      final response = await _dio.get<dynamic>(
+        Endpoints.recommendations,
+        queryParameters: {'kind': kind},
+      );
+      final data = response.data;
+      if (data is! Map<String, dynamic>) return const [];
+      final list = data['list'];
+      if (list is! List) return const [];
+      return list
+          .whereType<Map<String, dynamic>>()
+          .map((json) => MediaItem.fromJson(Map<String, dynamic>.from(json)))
+          .where((item) => item.title.isNotEmpty)
+          .toList();
     } on DioException catch (error) {
       throw ApiException.from(error);
     }
+  }
+
+  /// 近期热门（服务端聚合，混合电影与剧集）。
+  Future<List<MediaItem>> trending() async {
+    try {
+      final response = await _dio.get<dynamic>(Endpoints.tmdbTrending);
+      final data = response.data;
+      if (data is! Map<String, dynamic>) return const [];
+      final list = data['list'];
+      if (list is! List) return const [];
+      return list
+          .whereType<Map<String, dynamic>>()
+          .map((json) => MediaItem.fromJson(Map<String, dynamic>.from(json)))
+          .where((item) => item.title.isNotEmpty)
+          .toList();
+    } on DioException catch (error) {
+      throw ApiException.from(error);
+    }
+  }
+
+  /// 新番时刻表：优先 `/api/bangumi/schedule`，失败时回退 `/api/bangumi/calendar`。
+  Future<BangumiSchedule> bangumiSchedule() async {
+    try {
+      final response = await _dio.get<dynamic>(Endpoints.bangumi);
+      final parsed = BangumiSchedule.tryParse(response.data);
+      if (parsed != null && !parsed.isEmpty) return parsed;
+    } on DioException {
+      // Fall through to the calendar endpoint.
+    }
+    try {
+      final response = await _dio.get<dynamic>(Endpoints.bangumiCalendar);
+      final parsed = BangumiSchedule.tryParse(response.data);
+      if (parsed != null) return parsed;
+    } on DioException catch (error) {
+      throw ApiException.from(error);
+    }
+    return BangumiSchedule.empty();
   }
 
   List<MediaItem> _parseLooseList(dynamic data) {

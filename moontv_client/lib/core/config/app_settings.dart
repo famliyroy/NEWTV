@@ -15,7 +15,8 @@ class AppSettings {
     this.blockedWords = '',
     this.autoplayNext = true,
     this.hardwareDecode = true,
-    this.adblock = true,
+    // 默认直连片源：服务器与片源常处于不同网络，经服务端中转反而容易失败。
+    this.adblock = false,
     this.proxySegments = false,
     this.playbackToken = '',
   });
@@ -84,7 +85,7 @@ class SettingsController extends ChangeNotifier {
       blockedWords: _preferences.getString('blockedWords') ?? '',
       autoplayNext: _preferences.getBool('autoplayNext') ?? true,
       hardwareDecode: _preferences.getBool('hardwareDecode') ?? true,
-      adblock: _preferences.getBool('adblock') ?? true,
+      adblock: _preferences.getBool('adblock') ?? false,
       proxySegments: _preferences.getBool('proxySegments') ?? false,
       playbackToken: _preferences.getString('playbackToken') ?? '',
     );

@@ -13,6 +13,7 @@ class MediaItem {
     this.typeName = '',
     this.doubanId = '',
     this.weight = 0,
+    this.rate = '',
     this.lastEpisodeIndex = 0,
     this.playTimeSeconds = 0,
     this.totalTimeSeconds = 0,
@@ -33,6 +34,7 @@ class MediaItem {
   final String typeName;
   final String doubanId;
   final int weight;
+  final String rate;
   final int lastEpisodeIndex;
   final int playTimeSeconds;
   final int totalTimeSeconds;
@@ -56,13 +58,20 @@ class MediaItem {
     return const [];
   }
 
+  static String _year(dynamic value) {
+    final raw = _string(value);
+    final match = RegExp(r'\d{4}').firstMatch(raw);
+    return match?.group(0) ?? raw;
+  }
+
   factory MediaItem.fromJson(Map<String, dynamic> json) {
     final rawIndex = _int(json['index'], 1);
     final episodes = _stringList(json['episodes'] ?? json['vod_play_url']);
+    final mediaType = _string(json['media_type']);
     return MediaItem(
       id: _string(json['id'] ?? json['vod_id'] ?? json['detailId']),
       title: _string(json['title'] ?? json['vod_name'] ?? json['name'] ?? json['search_title']),
-      poster: _string(json['poster'] ?? json['vod_pic'] ?? json['cover'] ?? json['pic']),
+      poster: _string(json['poster'] ?? json['vod_pic'] ?? json['cover'] ?? json['pic'] ?? json['poster_path']),
       source: _string(json['source'] ?? json['source_code']),
       sourceName: _string(
         json['source_name'] ?? json['sourceName'] ?? json['source'],
@@ -71,12 +80,13 @@ class MediaItem {
       episodeTitles: _stringList(
         json['episodes_titles'] ?? json['episodeTitles'],
       ),
-      year: _string(json['year'] ?? json['vod_year']),
-      description: _string(json['desc'] ?? json['vod_content'] ?? json['description']),
+      year: _year(json['year'] ?? json['vod_year'] ?? json['release_date']),
+      description: _string(json['desc'] ?? json['vod_content'] ?? json['description'] ?? json['overview']),
       remarks: _string(json['vod_remarks'] ?? json['remarks']),
-      typeName: _string(json['type_name'] ?? json['class'] ?? json['weekday']),
+      typeName: _string(json['type_name'] ?? json['class'] ?? json['weekday'] ?? mediaType),
       doubanId: _string(json['douban_id']),
       weight: _int(json['weight']),
+      rate: _string(json['rate'] ?? json['vote_average']),
       lastEpisodeIndex: rawIndex > 0 ? rawIndex - 1 : 0,
       playTimeSeconds: _int(json['play_time']),
       totalTimeSeconds: _int(json['total_time']),
@@ -99,6 +109,7 @@ class MediaItem {
     String? typeName,
     String? doubanId,
     int? weight,
+    String? rate,
     int? lastEpisodeIndex,
     int? playTimeSeconds,
     int? totalTimeSeconds,
@@ -119,6 +130,7 @@ class MediaItem {
       typeName: typeName ?? this.typeName,
       doubanId: doubanId ?? this.doubanId,
       weight: weight ?? this.weight,
+      rate: rate ?? this.rate,
       lastEpisodeIndex: lastEpisodeIndex ?? this.lastEpisodeIndex,
       playTimeSeconds: playTimeSeconds ?? this.playTimeSeconds,
       totalTimeSeconds: totalTimeSeconds ?? this.totalTimeSeconds,

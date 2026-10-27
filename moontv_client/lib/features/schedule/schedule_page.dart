@@ -1,12 +1,16 @@
+import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
+import '../../domain/models/bangumi_schedule.dart';
 import '../../domain/models/media_item.dart';
 import '../../providers.dart';
-import '../../shared/widgets/empty_view.dart';
 import '../../shared/widgets/error_view.dart';
-import '../../shared/widgets/poster_card.dart';
+
+final bangumiScheduleProvider = FutureProvider.autoDispose<BangumiSchedule>((ref) {
+  return ref.watch(appDependenciesProvider).mediaRepository.bangumiSchedule();
+});
 
 class SchedulePage extends ConsumerStatefulWidget {
   const SchedulePage({super.key});
@@ -16,80 +20,200 @@ class SchedulePage extends ConsumerStatefulWidget {
 }
 
 class _SchedulePageState extends ConsumerState<SchedulePage> {
-  static const _weekdays = [
-    (label: '全部', keys: <String>[]),
-    (label: '周一', keys: ['1', 'mon', 'monday', '周一', '星期一']),
-    (label: '周二', keys: ['2', 'tue', 'tuesday', '周二', '星期二']),
-    (label: '周三', keys: ['3', 'wed', 'wednesday', '周三', '星期三']),
-    (label: '周四', keys: ['4', 'thu', 'thursday', '周四', '星期四']),
-    (label: '周五', keys: ['5', 'fri', 'friday', '周五', '星期五']),
-    (label: '周六', keys: ['6', 'sat', 'saturday', '周六', '星期六']),
-    (label: '周日', keys: ['7', '0', 'sun', 'sunday', '周日', '星期日', '星期天']),
-  ];
-
-  int _selectedDay = 0;
-
-  List<MediaItem> _filterByDay(List<MediaItem> items) {
-    if (_selectedDay == 0) return items;
-    final keys = _weekdays[_selectedDay].keys;
-    final matched = items.where((item) {
-      final tag = '${item.typeName} ${item.remarks}'.toLowerCase();
-      return keys.any(tag.contains);
-    }).toList();
-    return matched;
-  }
+  var _selectedDay = 0; // 0 = 全部
 
   @override
   Widget build(BuildContext context) {
-    return FutureBuilder<List<MediaItem>>(
-      future: ref.read(appDependenciesProvider).mediaRepository.bangumi(),
-      builder: (context, snapshot) {
-        if (snapshot.hasError) return ErrorView(message: snapshot.error.toString());
-        if (!snapshot.hasData) return const Center(child: CircularProgressIndicator());
-        final allItems = snapshot.data!;
-        if (allItems.isEmpty) {
-          return const EmptyView(title: '本周暂无数据', message: '新番表由服务端数据源提供');
+    final schedule = ref.watch(bangumiScheduleProvider);
+    return schedule.when(
+      loading: () => const Center(child: CircularProgressIndicator()),
+      error: (error, stackTrace) => ErrorView(
+        message: '新番表加载失败：$error',
+        onRetry: () => ref.invalidate(bangumiScheduleProvider),
+      ),
+      data: (data) {
+        final days = data.days.where((day) => day.items.isNotEmpty).toList();
+        if (days.isEmpty) {
+          return Center(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Text('新番表暂时为空'),
+                const SizedBox(height: 8),
+                TextButton(
+                  onPressed: () => ref.invalidate(bangumiScheduleProvider),
+                  child: const Text('重新加载'),
+                ),
+              ],
+            ),
+          );
         }
-        final items = _filterByDay(allItems);
+        final index = _selectedDay.clamp(0, days.length);
+        final visibleDays = index == 0 ? days : [days[index - 1]];
         return Column(
           children: [
-            SingleChildScrollView(
-              scrollDirection: Axis.horizontal,
-              padding: const EdgeInsets.fromLTRB(20, 12, 20, 4),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(20, 14, 12, 0),
               child: Row(
                 children: [
-                  for (var i = 0; i < _weekdays.length; i++) ...[
-                    ChoiceChip(
-                      label: Text(_weekdays[i].label),
-                      selected: _selectedDay == i,
-                      onSelected: (_) => setState(() => _selectedDay = i),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text('新番追更', style: Theme.of(context).textTheme.headlineSmall),
+                        const SizedBox(height: 2),
+                        Text(
+                          data.year > 0
+                              ? '${data.year} 年 ${data.seasonLabel} · 共 ${data.allItems.length} 部'
+                              : '共 ${data.allItems.length} 部',
+                          style: Theme.of(context).textTheme.bodySmall,
+                        ),
+                      ],
                     ),
-                    const SizedBox(width: 8),
-                  ],
+                  ),
+                  IconButton.filledTonal(
+                    tooltip: '刷新',
+                    onPressed: () => ref.invalidate(bangumiScheduleProvider),
+                    icon: const Icon(Icons.refresh),
+                  ),
                 ],
               ),
             ),
+            SizedBox(
+              height: 52,
+              child: ListView.separated(
+                scrollDirection: Axis.horizontal,
+                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                itemCount: days.length + 1,
+                separatorBuilder: (context, i) => const SizedBox(width: 8),
+                itemBuilder: (context, i) {
+                  final label = i == 0 ? '全部' : (days[i - 1].labelCn.isEmpty ? days[i - 1].labelEn : days[i - 1].labelCn);
+                  return ChoiceChip(
+                    label: Text(label),
+                    selected: _selectedDay == i,
+                    onSelected: (_) => setState(() => _selectedDay = i),
+                  );
+                },
+              ),
+            ),
             Expanded(
-              child: items.isEmpty
-                  ? const EmptyView(title: '当日暂无排期', message: '可切换其他日期查看')
-                  : GridView.builder(
-                      padding: const EdgeInsets.fromLTRB(20, 16, 20, 100),
-                      gridDelegate: const SliverGridDelegateWithMaxCrossAxisExtent(
-                        maxCrossAxisExtent: 180,
-                        mainAxisSpacing: 16,
-                        crossAxisSpacing: 16,
-                        childAspectRatio: 0.52,
-                      ),
-                      itemCount: items.length,
-                      itemBuilder: (context, index) {
-                        final item = items[index];
-                        return PosterCard(item: item, onTap: () => context.push('/detail', extra: [item]));
-                      },
-                    ),
+              child: ListView.builder(
+                padding: const EdgeInsets.fromLTRB(16, 8, 16, 110),
+                itemCount: visibleDays.length,
+                itemBuilder: (context, dayIndex) {
+                  final day = visibleDays[dayIndex];
+                  final label = day.labelCn.isEmpty ? day.labelEn : day.labelCn;
+                  return Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      if (index == 0)
+                        Padding(
+                          padding: const EdgeInsets.fromLTRB(4, 14, 4, 10),
+                          child: Row(
+                            children: [
+                              Text(
+                                label,
+                                style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                                      fontWeight: FontWeight.w700,
+                                    ),
+                              ),
+                              const SizedBox(width: 8),
+                              Text(
+                                '${day.items.length} 部',
+                                style: Theme.of(context).textTheme.bodySmall,
+                              ),
+                            ],
+                          ),
+                        ),
+                      for (final item in day.items)
+                        _BangumiTile(item: item),
+                    ],
+                  );
+                },
+              ),
             ),
           ],
         );
       },
+    );
+  }
+}
+
+class _BangumiTile extends StatelessWidget {
+  const _BangumiTile({required this.item});
+
+  final MediaItem item;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 10),
+      child: Material(
+        color: scheme.surfaceContainerHighest.withValues(alpha: 0.45),
+        borderRadius: BorderRadius.circular(14),
+        child: InkWell(
+          borderRadius: BorderRadius.circular(14),
+          onTap: () => context.push('/search', extra: item.title),
+          child: Padding(
+            padding: const EdgeInsets.all(10),
+            child: Row(
+              children: [
+                ClipRRect(
+                  borderRadius: BorderRadius.circular(10),
+                  child: SizedBox(
+                    width: 58,
+                    height: 82,
+                    child: item.poster.isEmpty
+                        ? ColoredBox(color: scheme.surfaceContainerHighest)
+                        : CachedNetworkImage(
+                            imageUrl: item.poster,
+                            fit: BoxFit.cover,
+                            fadeInDuration: const Duration(milliseconds: 100),
+                            errorWidget: (context, url, error) => ColoredBox(
+                              color: scheme.surfaceContainerHighest,
+                              child: const Icon(Icons.broken_image_outlined, size: 18),
+                            ),
+                          ),
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        item.title,
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                        style: Theme.of(context).textTheme.titleSmall?.copyWith(
+                              fontWeight: FontWeight.w600,
+                            ),
+                      ),
+                      const SizedBox(height: 6),
+                      Row(
+                        children: [
+                          if (item.year.isNotEmpty)
+                            Text(item.year, style: Theme.of(context).textTheme.bodySmall),
+                          if (item.remarks.isNotEmpty) ...[
+                            const SizedBox(width: 8),
+                            Icon(Icons.star_rounded, size: 14, color: scheme.tertiary),
+                            Text(
+                              item.remarks,
+                              style: Theme.of(context).textTheme.bodySmall,
+                            ),
+                          ],
+                        ],
+                      ),
+                    ],
+                  ),
+                ),
+                const Icon(Icons.chevron_right),
+              ],
+            ),
+          ),
+        ),
+      ),
     );
   }
 }
