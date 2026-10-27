@@ -9,6 +9,7 @@ import 'package:media_kit_video/media_kit_video.dart';
 import 'package:window_manager/window_manager.dart';
 
 import '../../core/player/player_controller.dart';
+import '../../core/utils/playback_resume.dart';
 import '../../domain/models/media_item.dart';
 import '../../providers.dart';
 import '../danmaku/danmaku_controller.dart';
@@ -57,7 +58,8 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
     _player.addListener(() {
       _danmaku
         ..setPosition(_player.position.inMilliseconds / 1000)
-        ..setPlaying(_player.playing);
+        ..setPlaying(_player.playing)
+        ..setRate(_player.rate);
     });
     unawaited(_player.open(_currentPlayback));
     unawaited(_danmaku.loadFor(_currentPlayback));
@@ -84,7 +86,8 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
       if (record.playTimeSeconds < 10) return;
       // 停在片尾的记录不必提示「从上次继续」。
       if (record.totalTimeSeconds > 0 &&
-          record.playTimeSeconds >= record.totalTimeSeconds - 30) {
+          record.playTimeSeconds >=
+              record.totalTimeSeconds - nearEndThresholdSeconds) {
         return;
       }
       // 播放器已经开始推进就不该再提示「从上次继续」。

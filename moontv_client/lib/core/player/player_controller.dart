@@ -9,6 +9,7 @@ import 'package:media_kit_video/media_kit_video.dart';
 import '../../core/config/app_settings.dart';
 import '../../core/config/server_config.dart';
 import '../../core/network/api_exception.dart';
+import '../../core/utils/playback_resume.dart';
 import '../../data/api/media_api.dart';
 import '../../domain/models/media_item.dart';
 import 'hls_quality.dart';
@@ -51,26 +52,12 @@ class PlayerController extends ChangeNotifier {
     _subscriptions.addAll([
       player.stream.position.listen((value) {
         _position = value;
-        if (_pendingInitialSeek != null && _duration > Duration.zero) {
-          final target = _pendingInitialSeek!;
-          _pendingInitialSeek = null;
-          if (target > Duration.zero &&
-              target.inMilliseconds < _duration.inMilliseconds * 0.95) {
-            unawaited(player.seek(target));
-          }
-        }
+        _consumePendingSeek();
         notifyListeners();
       }),
       player.stream.duration.listen((value) {
         _duration = value;
-        if (_pendingInitialSeek != null && _duration > Duration.zero) {
-          final target = _pendingInitialSeek!;
-          _pendingInitialSeek = null;
-          if (target > Duration.zero &&
-              target.inMilliseconds < _duration.inMilliseconds * 0.95) {
-            unawaited(player.seek(target));
-          }
-        }
+        _consumePendingSeek();
         notifyListeners();
       }),
       player.stream.playing.listen((value) {
@@ -223,6 +210,25 @@ class PlayerController extends ChangeNotifier {
     if (_rawUrl != null && _rawUrl!.contains('.m3u8')) {
       unawaited(_probeQuality());
     }
+  }
+
+  /// 媒体时长为 0 时 seek 会被播放器忽略，因此初始续播位置要等到
+  /// duration 可用后再执行，并且只执行一次。
+  ///
+  /// 片尾阈值与详情页/继续观看提示保持一致（30 秒）：太靠后的记录不跳，
+  /// 否则会停在放不出画面的位置。
+  void _consumePendingSeek() {
+    final target = _pendingInitialSeek;
+    if (target == null || _duration <= Duration.zero) return;
+    _pendingInitialSeek = null;
+    if (target <= Duration.zero) return;
+    if (target.inSeconds >= _duration.inSeconds - nearEndThresholdSeconds) {
+      if (kDebugMode) {
+        debugPrint('NEWTV skip near-end resume: $target / $_duration');
+      }
+      return;
+    }
+    unawaited(player.seek(target));
   }
 
   /// 拉取 master playlist 并测速。失败时静默降级为「自动（单一流）」。

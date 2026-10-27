@@ -7,6 +7,7 @@ import 'package:go_router/go_router.dart';
 
 import '../../core/network/api_exception.dart';
 import '../../core/utils/media_grouping.dart';
+import '../../core/utils/playback_resume.dart';
 import '../../domain/models/media_item.dart';
 import '../../providers.dart';
 import '../../shared/widgets/smart_image.dart';
@@ -211,20 +212,19 @@ class _DetailPageState extends ConsumerState<DetailPage> {
           .mediaRepository
           .playRecordFor(item);
       if (!mounted || record == null) return;
+      // 期间可能切了片源/换了集，迟到的结果直接丢弃。
       if (_selectedSource.storageKey != key || _item.episodes.isEmpty) return;
-      final index = record.lastEpisodeIndex.clamp(0, _item.episodes.length - 1);
-      final seconds = record.playTimeSeconds;
-      if (index <= 0 && seconds <= 0) return;
-      // 记录停在片尾（差 30 秒内）视为已看完，只定位集数、不再续播末段。
-      final finished = record.totalTimeSeconds > 0 &&
-          seconds >= record.totalTimeSeconds - 30;
+      final point = resolveResumePoint(item: _item, record: record);
+      if (point == null) return;
       setState(() {
         _item = _item.copyWith(
-          lastEpisodeIndex: index,
-          playTimeSeconds: finished ? 0 : seconds,
-          totalTimeSeconds: record.totalTimeSeconds,
+          lastEpisodeIndex: point.episodeIndex,
+          // 片尾记录不再续播末段，只定位集数。
+          playTimeSeconds: point.startSeconds,
+          totalTimeSeconds: point.totalSeconds,
         );
-        if (!_episodePickedByUser) _selectedEpisode = index;
+        // 用户手动选过集就不许被迟到的异步查询改回去。
+        if (!_episodePickedByUser) _selectedEpisode = point.episodeIndex;
       });
     } on Object {
       // 记录拉取失败不影响详情展示。
@@ -293,9 +293,11 @@ class _DetailPageState extends ConsumerState<DetailPage> {
         item: item,
         episodeIndex: _selectedEpisode.clamp(0, item.episodes.length - 1),
         availableSources: _sources,
-        initialPositionSeconds: _selectedEpisode == item.lastEpisodeIndex
-            ? item.playTimeSeconds
-            : 0,
+        // 只有选中集等于记录集数才续播，其它集一律从头。
+        initialPositionSeconds: resumeStartSeconds(
+          item: item,
+          selectedEpisode: _selectedEpisode,
+        ),
       ),
     );
   }

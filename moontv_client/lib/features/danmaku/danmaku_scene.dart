@@ -51,6 +51,9 @@ class DanmakuScene {
 
   List<DanmakuComment> get comments => _comments;
 
+  /// 当前绘制所使用的时间位置（秒）。由 Overlay 的 Ticker 每帧写入。
+  double get position => _position;
+
   /// 弹幕列表或渲染设置变化时调用。
   ///
   /// 只对**影响布局**的字段（字号/速度/显示区域）作废轨道分配，

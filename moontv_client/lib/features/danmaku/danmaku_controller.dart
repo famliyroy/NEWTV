@@ -37,6 +37,7 @@ class DanmakuController extends ChangeNotifier {
   PlaybackContext? _lastContext;
   var _wasEnabled = true;
   var _playing = true;
+  double _rate = 1.0;
   DanmakuLoadResult? _result;
   var _generation = 0;
 
@@ -86,6 +87,15 @@ class DanmakuController extends ChangeNotifier {
   void setPlaying(bool value) {
     if (_playing == value) return;
     _playing = value;
+    notifyListeners();
+  }
+
+  /// 播放速率。弹幕位置 = 锚点 + 墙钟差 × 该倍速，0.5x~3x 都靠它对齐。
+  double get rate => _rate;
+
+  void setRate(double value) {
+    if (value <= 0 || (_rate - value).abs() < 0.001) return;
+    _rate = value;
     notifyListeners();
   }
 
