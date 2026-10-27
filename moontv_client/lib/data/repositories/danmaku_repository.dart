@@ -18,6 +18,10 @@ class DanmakuLoadResult {
     required this.totalSources,
     required this.fromCache,
     this.message = '',
+    this.providerDescription = '',
+    this.matchedTitle = '',
+    this.matchedEpisode = '',
+    this.providerName = '',
   });
 
   final List<DanmakuComment> comments;
@@ -25,6 +29,18 @@ class DanmakuLoadResult {
   final int totalSources;
   final bool fromCache;
   final String message;
+
+  /// 数据源描述（MoonTVPlus 聚合 / 自定义 LogVar）。
+  final String providerDescription;
+
+  /// 命中的作品名（数据源侧原始标题）。
+  final String matchedTitle;
+
+  /// 命中的集标题。
+  final String matchedEpisode;
+
+  /// 提供方，如 dandan / animeko / bilibili。
+  final String providerName;
 }
 
 typedef DanmakuProgress = void Function(int loaded, int total, int comments);
@@ -101,6 +117,8 @@ class DanmakuRepository {
   final DanmakuSource _api;
   final DanmakuCache _cache;
 
+  String get description => _api.description;
+
   Future<DanmakuLoadResult> load({
     required String title,
     required double episodeNumber,
@@ -111,22 +129,24 @@ class DanmakuRepository {
   }) async {
     final cleanTitle = cleanDanmakuTitle(title);
     if (cleanTitle.isEmpty) {
-      return const DanmakuLoadResult(
-        comments: [],
+      return DanmakuLoadResult(
+        comments: const [],
         loadedSources: 0,
         totalSources: 0,
         fromCache: false,
         message: '无法识别标题',
+        providerDescription: _api.description,
       );
     }
     if (allowCache) {
-      final cached = await _cache.read(_cacheKey(cleanTitle), episodeNumber);
-      if (cached != null) {
+      final cached = await _cache.read(_cacheKey(cleanTitle), episodeNumber);      if (cached != null) {
         return DanmakuLoadResult(
           comments: cached,
           loadedSources: cached.map((e) => e.source).toSet().length,
           totalSources: cached.map((e) => e.source).toSet().length,
           fromCache: true,
+          providerDescription: _api.description,
+          matchedTitle: cleanTitle,
         );
       }
     }
@@ -135,12 +155,14 @@ class DanmakuRepository {
         .take(maxSources)
         .toList();
     if (animes.isEmpty) {
-      return const DanmakuLoadResult(
-        comments: [],
+      return DanmakuLoadResult(
+        comments: const [],
         loadedSources: 0,
         totalSources: 0,
         fromCache: false,
         message: '未找到该作品的弹幕',
+        providerDescription: _api.description,
+        matchedTitle: cleanTitle,
       );
     }
 
@@ -178,6 +200,9 @@ class DanmakuRepository {
         totalSources: animes.length,
         fromCache: false,
         message: '未能匹配当前集数',
+        providerDescription: _api.description,
+        matchedTitle: animes.first.animeTitle,
+        providerName: animes.first.source,
       );
     }
 
@@ -211,6 +236,10 @@ class DanmakuRepository {
       totalSources: animes.length,
       fromCache: false,
       message: usable.isEmpty ? '弹幕源暂时不可用' : '',
+      providerDescription: _api.description,
+      matchedTitle: matched.first.anime.animeTitle,
+      matchedEpisode: matched.first.episode.episodeTitle,
+      providerName: matched.first.anime.source,
     );
   }
 
@@ -253,6 +282,10 @@ class DanmakuRepository {
         loadedSources: 1,
         totalSources: 1,
         fromCache: false,
+        providerDescription: _api.description,
+        matchedTitle: anime.animeTitle,
+        matchedEpisode: matched.episodeTitle,
+        providerName: anime.source,
       );
     }
     return DanmakuLoadResult(
@@ -261,6 +294,7 @@ class DanmakuRepository {
       totalSources: 1,
       fromCache: false,
       message: '未找到该集的弹幕',
+      providerDescription: _api.description,
     );
   }
 

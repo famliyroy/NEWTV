@@ -14,6 +14,9 @@ abstract class DanmakuSource {
   /// 再叠加客户端聚合只会重复请求并触发 429。
   bool get aggregates;
 
+  /// 当前数据源的可读描述，用于弹幕设置面板展示。
+  String get description => aggregates ? 'MoonTVPlus 聚合' : '自定义弹幕源';
+
   Future<List<DanmakuAnime>> search(String keyword, {Duration? timeout});
 
   Future<List<DanmakuEpisode>> episodes(String animeId, {Duration? timeout});
@@ -33,6 +36,9 @@ class DanmakuApi implements DanmakuSource {
 
   @override
   bool get aggregates => true;
+
+  @override
+  String get description => 'MoonTVPlus 聚合';
 
   @override
   Future<List<DanmakuAnime>> search(String keyword, {Duration? timeout}) async {
@@ -126,6 +132,17 @@ class LogVarDanmakuApi implements DanmakuSource {
 
   @override
   bool get aggregates => false;
+
+  @override
+  String get description {
+    final uri = Uri.tryParse(_base);
+    final host = uri == null
+        ? _base
+        : uri.hasPort
+            ? '${uri.host}:${uri.port}'
+            : uri.host;
+    return '自定义 LogVar ($host)';
+  }
 
   String get _base {
     var value = baseUrl.trim();
@@ -364,6 +381,9 @@ class SwitchableDanmakuSource implements DanmakuSource {
 
   @override
   bool get aggregates => active.aggregates;
+
+  @override
+  String get description => active.description;
 
   @override
   Future<List<DanmakuAnime>> search(String keyword, {Duration? timeout}) =>

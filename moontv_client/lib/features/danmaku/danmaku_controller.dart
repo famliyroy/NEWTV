@@ -9,12 +9,17 @@ import '../../domain/models/media_item.dart';
 
 class DanmakuController extends ChangeNotifier {
   DanmakuController(this._repository, this._settings) {
-    _wasEnabled = _settings.settings.danmakuEnabled;
+    final config = _settings.settings;
+    _wasEnabled = config.danmakuEnabled;
+    _captureLoadParams(config);
     _settings.addListener(_handleSettingsChanged);
   }
 
   static const _successTtl = Duration(seconds: 3);
   static const _errorTtl = Duration(seconds: 5);
+
+  /// 加载期参数变化后的合并窗口：拖滑块/切源时避免连续重拉。
+  static const reloadDebounce = Duration(milliseconds: 500);
 
   final DanmakuRepository _repository;
 
@@ -27,9 +32,17 @@ class DanmakuController extends ChangeNotifier {
   var _totalSources = 0;
   String _status = '';
   Timer? _statusTimer;
+  Timer? _reloadTimer;
   Future<DanmakuLoadResult>? _operation;
   PlaybackContext? _lastContext;
   var _wasEnabled = true;
+  DanmakuLoadResult? _result;
+  var _generation = 0;
+
+  // 最近一次加载实际使用的「加载期参数」，用于判断是否需要自动重载。
+  var _activeMaxSources = 12;
+  var _activeApiMode = 0;
+  var _activeApiBaseUrl = '';
 
   List<DanmakuComment> get comments => _comments;
   double get position => _position;
@@ -43,6 +56,22 @@ class DanmakuController extends ChangeNotifier {
   String get status => _status;
   bool get loading => _operation != null;
 
+  /// 数据源描述，如「MoonTVPlus 聚合」「自定义 LogVar (35.212.231.252:9321)」。
+  String get sourceDescription =>
+      _result?.providerDescription ?? _repository.description;
+
+  /// 命中的作品名（数据源侧原始标题）。
+  String get matchedTitle => _result?.matchedTitle ?? '';
+
+  /// 命中的集标题。
+  String get matchedEpisode => _result?.matchedEpisode ?? '';
+
+  /// 提供方，如 dandan / animeko / bilibili。
+  String get providerName => _result?.providerName ?? '';
+
+  /// 最近一次加载的结论（未加载时为 null）。
+  DanmakuLoadResult? get lastResult => _result;
+
   void setPosition(double seconds) {
     if ((_position - seconds).abs() < 0.05) return;
     _position = seconds;
@@ -55,20 +84,45 @@ class DanmakuController extends ChangeNotifier {
     if (!value) clear();
   }
 
+  void _captureLoadParams(AppSettings config) {
+    _activeMaxSources = config.danmakuMaxSources;
+    _activeApiMode = config.danmakuApiMode;
+    _activeApiBaseUrl = config.danmakuApiBaseUrl;
+  }
+
   void _handleSettingsChanged() {
-    final nowEnabled = enabled;
-    // 只在「关闭 → 开启」这一刻补加载：内存里的弹幕已被 clear 掉了。
-    if (nowEnabled && !_wasEnabled && _lastContext != null && _operation == null) {
-      unawaited(loadFor(_lastContext!));
-    }
+    final config = _settings.settings;
+    final nowEnabled = config.danmakuEnabled;
+
+    // 关闭 → 开启：内存里的弹幕已被 clear，按当前上下文补一次加载。
+    if (nowEnabled && !_wasEnabled) _scheduleReload(immediate: true);
     _wasEnabled = nowEnabled;
+
+    // 来源上限、数据源模式、自定义地址都是「加载期参数」，改了必须重载，
+    // 否则用户得退出播放页再进来才生效。
+    final loadParamsChanged = config.danmakuMaxSources != _activeMaxSources ||
+        config.danmakuApiMode != _activeApiMode ||
+        config.danmakuApiBaseUrl != _activeApiBaseUrl;
+    if (loadParamsChanged && nowEnabled) _scheduleReload();
+
     notifyListeners();
+  }
+
+  void _scheduleReload({bool immediate = false}) {
+    final context = _lastContext;
+    if (context == null) return;
+    _reloadTimer?.cancel();
+    _reloadTimer = Timer(
+      immediate ? Duration.zero : reloadDebounce,
+      () => unawaited(loadFor(context)),
+    );
   }
 
   void clear() {
     _comments = const [];
     _loadedSources = 0;
     _totalSources = 0;
+    _result = null;
     _statusTimer?.cancel();
     _status = '';
     notifyListeners();
@@ -89,14 +143,20 @@ class DanmakuController extends ChangeNotifier {
 
   Future<void> loadFor(PlaybackContext context) async {
     _lastContext = context;
-    if (!enabled) return;
+    final config = _settings.settings;
+    _captureLoadParams(config);
+    if (!config.danmakuEnabled) return;
+
+    // 每次加载递增代号：旧的请求晚回来时直接丢弃，避免覆盖新结果。
+    final generation = ++_generation;
     clear();
     final operation = _repository.load(
       title: context.item.title,
       episodeNumber: context.episodeIndex + 1,
       totalEpisodes: context.item.episodes.length,
-      maxSources: _settings.settings.danmakuMaxSources,
+      maxSources: config.danmakuMaxSources,
       onProgress: (loaded, total, comments) {
+        if (generation != _generation) return;
         _loadedSources = loaded;
         _totalSources = total;
         _setStatus('弹幕 $loaded/$total 源 · $comments 条');
@@ -106,9 +166,11 @@ class DanmakuController extends ChangeNotifier {
     notifyListeners();
     try {
       final result = await operation;
+      if (generation != _generation) return;
       _comments = result.comments;
       _loadedSources = result.loadedSources;
       _totalSources = result.totalSources;
+      _result = result;
       final message = result.fromCache
           ? '弹幕已缓存 · ${result.comments.length} 条'
           : result.message.isNotEmpty
@@ -116,9 +178,10 @@ class DanmakuController extends ChangeNotifier {
               : '弹幕 ${result.loadedSources}/${result.totalSources} 源 · ${result.comments.length} 条';
       _setStatus(message, ttl: _ttlFor(message));
     } on Object {
+      if (generation != _generation) return;
       _setStatus('弹幕加载失败', ttl: _errorTtl);
     } finally {
-      _operation = null;
+      if (generation == _generation) _operation = null;
       notifyListeners();
     }
   }
@@ -134,6 +197,7 @@ class DanmakuController extends ChangeNotifier {
   void dispose() {
     _settings.removeListener(_handleSettingsChanged);
     _statusTimer?.cancel();
+    _reloadTimer?.cancel();
     _operation?.ignore();
     super.dispose();
   }

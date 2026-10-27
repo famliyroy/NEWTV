@@ -4,6 +4,24 @@
 
 ## [Unreleased]
 
+## [0.1.5] - 2026-10-27
+
+### Fixed
+
+- **弹幕卡顿、一屏叠成「弹幕墙」、飞行途中上下跳行**：渲染层重写。
+  - 根因一：`DanmakuOverlay` 的 `AnimatedBuilder` 每帧 new 一个 `DanmakuPainter`，挂在实例上的 TextPainter 缓存与轨道记忆随实例丢弃 → 缓存永远为空，每帧对同屏 80 条弹幕逐条 `TextPainter.layout()`。现在 `DanmakuOverlay` 改为 `StatefulWidget`，State 持久持有 `DanmakuScene`（TextPainter 缓存 + 轨道分配），位置更新只通过 `CustomPainter.repaint` 的 Listenable 触发重绘，widget 不重建，外层加 `RepaintBoundary` 与视频解耦。
+  - 根因二：行号是 `下标 % 轨道数` 的伪随机分配，既无占用检查（同轨叠 8~10 条），又会随 active 列表进出漂移（跳行）。新增 `DanmakuTrackAllocator`：每条轨道只记 `freeAt = 入场时刻 + (文字宽度 + 间距) / 滚动速度`，新弹幕取第一条 `freeAt <= 当前时刻` 的轨道，全满则丢弃该条；分配按弹幕键缓存，飞行中行号不变。
+  - 阴影由 `blurRadius: 3` 改为「黑色描边 + 彩色填充」两遍绘制，省掉模糊采样；同屏上限改为 `min(轨道数 × 2, 40)`。
+  - 状态胶囊改用 `ValueNotifier` 驱动，播放位置 20Hz 的通知不再带动 widget 子树重建。
+- **播放页内改设置不生效**：`danmakuMaxSources`（来源上限）与弹幕数据源模式/地址属于「加载期参数」，此前改了要重进播放页。现在 `DanmakuController` 监听这些变化，500ms 防抖后按当前播放上下文自动重新加载，并用加载代号丢弃迟到的旧结果。
+- **透明度调整可能命中旧缓存**：TextPainter 缓存 key 纳入字号、颜色、透明度与描边/填充标记，同时在设置变化时整体失效。
+
+### Added
+
+- 弹幕设置面板顶部新增「当前弹幕源」信息卡：数据源模式（MoonTVPlus 聚合 / 自定义 LogVar）、命中的作品与集、提供方（dandan / animeko / bilibili）、已加载 n/m 源与总条数，加载中/无弹幕/未接入均有对应状态。
+- 登录页支持注册：站点 `EnableRegistration=true` 且非 localstorage 模式时显示「没有账号？注册」；`RequireRegistrationInviteCode` 时追加邀请码，`RegistrationRequireTurnstile` 时追加 Token 输入；注册成功自动用同一凭据登录，后端错误（邀请码错误、用户名格式、用户名已注册等）按 `error` 文案展示。
+- 设置页版本号改为读取 `package_info_plus`，不再手写。
+
 ## [0.1.4] - 2026-10-27
 
 ### Fixed

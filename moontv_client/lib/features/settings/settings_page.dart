@@ -2,12 +2,16 @@ import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
+import 'package:package_info_plus/package_info_plus.dart';
 
 import '../../core/config/app_settings.dart';
 import '../../core/network/api_exception.dart';
 import '../../data/api/danmaku_api.dart';
 import '../../providers.dart';
 import '../../shared/widgets/glass_card.dart';
+
+/// 版本号取一次就缓存，避免每次 rebuild 都走平台通道。
+final _appInfoFuture = PackageInfo.fromPlatform();
 
 class SettingsPage extends ConsumerWidget {
   const SettingsPage({super.key});
@@ -193,20 +197,30 @@ class SettingsPage extends ConsumerWidget {
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               Text('关于', style: Theme.of(context).textTheme.titleMedium),
-              ListTile(
-                contentPadding: EdgeInsets.zero,
-                leading: const Icon(Icons.info_outline),
-                title: const Text('NEWTV · v0.1.4'),
-                subtitle: const Text('MoonTVPlus 多端原生客户端（支持 Windows / Android / Android TV）'),
-                trailing: TextButton(
-                  onPressed: () => showLicensePage(
-                    context: context,
-                    applicationName: 'NEWTV',
-                    applicationVersion: '0.1.4',
-                    applicationLegalese: '后端协议兼容：MoonTVPlus (CC BY-NC-SA 4.0)\n界面交互致谢：NipaPlay-Reload (MIT)',
-                  ),
-                  child: const Text('开源许可'),
-                ),
+              FutureBuilder<PackageInfo>(
+                future: _appInfoFuture,
+                builder: (context, snapshot) {
+                  final info = snapshot.data;
+                  final version = info == null
+                      ? '—'
+                      : 'v${info.version}+${info.buildNumber}';
+                  return ListTile(
+                    contentPadding: EdgeInsets.zero,
+                    leading: const Icon(Icons.info_outline),
+                    title: Text('NEWTV · $version'),
+                    subtitle: const Text('MoonTVPlus 多端原生客户端（支持 Windows / Android / Android TV）'),
+                    trailing: TextButton(
+                      onPressed: () => showLicensePage(
+                        context: context,
+                        applicationName: 'NEWTV',
+                        applicationVersion: info?.version ?? '',
+                        applicationLegalese:
+                            '后端协议兼容：MoonTVPlus (CC BY-NC-SA 4.0)\n界面交互致谢：NipaPlay-Reload (MIT)',
+                      ),
+                      child: const Text('开源许可'),
+                    ),
+                  );
+                },
               ),
             ],
           ),

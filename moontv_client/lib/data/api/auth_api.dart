@@ -11,6 +11,9 @@ class ServerProbeResult {
     this.siteName = 'MoonTVPlus',
     this.loginRequireTurnstile = false,
     this.turnstileSiteKey = '',
+    this.enableRegistration = false,
+    this.requireRegistrationInviteCode = false,
+    this.registrationRequireTurnstile = false,
   });
 
   final ServerConfig config;
@@ -18,8 +21,15 @@ class ServerProbeResult {
   final String siteName;
   final bool loginRequireTurnstile;
   final String turnstileSiteKey;
+  final bool enableRegistration;
+  final bool requireRegistrationInviteCode;
+  final bool registrationRequireTurnstile;
 
   bool get needsUsername => storageType.toLowerCase() != 'localstorage';
+
+  /// 注册入口是否应该出现：站点开启注册，且不是 localstorage 模式
+  /// （localstorage 模式下后端直接 400「不支持注册」）。
+  bool get canRegister => enableRegistration && needsUsername;
 
   factory ServerProbeResult.fromServerConfigJson(
     ServerConfig config,
@@ -55,6 +65,9 @@ class ServerProbeResult {
       siteName: siteName.isEmpty ? 'MoonTVPlus' : siteName,
       loginRequireTurnstile: pickBool('LoginRequireTurnstile'),
       turnstileSiteKey: pickString('TurnstileSiteKey'),
+      enableRegistration: pickBool('EnableRegistration'),
+      requireRegistrationInviteCode: pickBool('RequireRegistrationInviteCode'),
+      registrationRequireTurnstile: pickBool('RegistrationRequireTurnstile'),
     );
   }
 }
@@ -154,6 +167,67 @@ class AuthApi {
               (seconds == null ? '尝试过于频繁，请稍后再试' : '尝试过于频繁，请 $seconds 秒后重试'),
           statusCode: 429,
         );
+      }
+      throw ApiException.from(error);
+    }
+  }
+
+  /// 注册新账号。错误文案优先透传后端返回的 `error`（如「注册功能未开启」
+  /// 「邀请码错误」「用户名只能包含字母、数字、下划线，长度3-20位」）。
+  Future<void> register({
+    required String username,
+    required String password,
+    String? inviteCode,
+    String? turnstileToken,
+  }) async {
+    try {
+      final response = await _dio.post<dynamic>(
+        Endpoints.register,
+        data: {
+          'username': username.trim(),
+          'password': password,
+          if (inviteCode != null && inviteCode.trim().isNotEmpty)
+            'inviteCode': inviteCode.trim(),
+          if (turnstileToken != null && turnstileToken.trim().isNotEmpty)
+            'turnstileToken': turnstileToken.trim(),
+        },
+      );
+      final data = response.data;
+      if (response.statusCode != 200 ||
+          (data is Map<String, dynamic> && data['ok'] == false)) {
+        throw ApiException(
+          ApiErrorKind.business,
+          _extractServerError(data) ?? '注册失败，请稍后重试',
+        );
+      }
+    } on DioException catch (error) {
+      final status = error.response?.statusCode;
+      final serverMessage = _extractServerError(error.response?.data);
+      switch (status) {
+        case 409:
+          throw ApiException(
+            ApiErrorKind.business,
+            serverMessage ?? '该用户名已被占用，请换一个',
+            statusCode: 409,
+          );
+        case 403:
+          throw ApiException(
+            ApiErrorKind.business,
+            serverMessage ?? '注册功能未开启',
+            statusCode: 403,
+          );
+        case 400:
+          throw ApiException(
+            ApiErrorKind.business,
+            serverMessage ?? '注册信息不符合要求',
+            statusCode: 400,
+          );
+        case 429:
+          throw ApiException(
+            ApiErrorKind.rateLimited,
+            serverMessage ?? '尝试过于频繁，请稍后再试',
+            statusCode: 429,
+          );
       }
       throw ApiException.from(error);
     }

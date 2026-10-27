@@ -1,5 +1,6 @@
 abstract final class Endpoints {
   static const login = '/api/login';
+  static const register = '/api/register';
   static const refresh = '/api/auth/refresh';
   static const logout = '/api/logout';
   static const serverConfig = '/api/server-config';

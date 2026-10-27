@@ -331,7 +331,8 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
                         showModalBottomSheet<void>(
                           context: context,
                           isScrollControlled: true,
-                          builder: (context) => const DanmakuSettingsSheet(),
+                          builder: (context) =>
+                              DanmakuSettingsSheet(controller: _danmaku),
                         );
                         _showControls();
                       },
