@@ -11,6 +11,7 @@ import '../../core/config/server_config.dart';
 import '../../core/network/api_exception.dart';
 import '../../data/api/media_api.dart';
 import '../../domain/models/media_item.dart';
+import 'hls_quality.dart';
 
 /// 播放请求统一使用浏览器 UA：部分片源站 WAF 会拒绝
 /// `NEWTV/0.1` 这类非浏览器标识，表现为连接被重置。
@@ -21,7 +22,7 @@ const _playbackUserAgent =
 class PlayerController extends ChangeNotifier {
   PlayerController({
     required ServerConfig server,
-    required AppSettings settings,
+    required SettingsController settings,
     Dio? dio,
     this.onCompleted,
   })  : _server = server,
@@ -108,12 +109,18 @@ class PlayerController extends ChangeNotifier {
   }
 
   final ServerConfig _server;
-  final AppSettings _settings;
+
+  /// 持有 storage 而非值快照：`open()` 每次都现场读，
+  /// 用户在设置页/播放页改的开关无需重进 APP 即可生效。
+  final SettingsController _settings;
   final Dio? _dio;
   final VoidCallback? onCompleted;
   final Player player;
   late final VideoController videoController;
   final _subscriptions = <StreamSubscription<dynamic>>[];
+
+  /// 清晰度菜单里的「自动」项。
+  static const autoQualityLabel = '自动';
 
   PlaybackContext? _context;
   Duration _position = Duration.zero;
@@ -128,6 +135,10 @@ class PlayerController extends ChangeNotifier {
   var _playing = false;
   var _buffering = false;
   String? _error;
+  List<HlsVariant> _variants = const [];
+  String _selectedQuality = autoQualityLabel;
+  bool _singleStreamQuality = false;
+  bool _probingQuality = false;
 
   PlaybackContext? get context => _context;
   Duration get position => _position;
@@ -137,6 +148,12 @@ class PlayerController extends ChangeNotifier {
   bool get buffering => _buffering;
   String? get error => _error;
   String? get errorDetail => _errorDetail;
+
+  /// 可选清晰度（已测速）；空表示尚未探测完或单码率。
+  List<HlsVariant> get variants => _variants;
+  String get selectedQuality => _selectedQuality;
+  bool get probingQuality => _probingQuality;
+  bool get singleStreamQuality => _singleStreamQuality;
   bool get hasNextEpisode {
     final current = _context;
     if (current == null) return false;
@@ -149,6 +166,8 @@ class PlayerController extends ChangeNotifier {
     _errorDetail = null;
     _position = Duration.zero;
     _duration = Duration.zero;
+    _variants = const [];
+    _selectedQuality = autoQualityLabel;
     _pendingInitialSeek = context.initialPositionSeconds > 0
         ? Duration(seconds: context.initialPositionSeconds)
         : null;
@@ -162,21 +181,22 @@ class PlayerController extends ChangeNotifier {
     final index = context.episodeIndex.clamp(0, episodes.length - 1);
     _rawUrl = episodes[index];
     _serverError = null;
+    final settings = _settings.settings;
     final proxyUrl = MediaApi.buildProxyUrl(
       baseUrl: _server.baseUrl,
       rawUrl: _rawUrl!,
       source: context.item.source,
-      playbackToken: _settings.playbackToken,
-      adblock: _settings.adblock,
-      proxySegments: _settings.proxySegments,
+      playbackToken: settings.playbackToken,
+      adblock: settings.adblock,
+      proxySegments: settings.proxySegments,
     );
     // 全量代理分片模式：本机到源站 CDN 不通时，只能全部走用户自己的服务器。
     final proxyAllUrl = MediaApi.buildProxyUrl(
       baseUrl: _server.baseUrl,
       rawUrl: _rawUrl!,
       source: context.item.source,
-      playbackToken: _settings.playbackToken,
-      adblock: _settings.adblock,
+      playbackToken: settings.playbackToken,
+      adblock: settings.adblock,
       proxySegments: true,
     );
 
@@ -199,6 +219,114 @@ class PlayerController extends ChangeNotifier {
 
     if (kDebugMode) debugPrint('NEWTV play url: ${_candidates[_candidateIndex]}');
     await _openUrl(_candidates[_candidateIndex]);
+    // 清晰度探测不阻塞起播：拿到 master 后逐档测速，完成后再刷新菜单。
+    if (_rawUrl != null && _rawUrl!.contains('.m3u8')) {
+      unawaited(_probeQuality());
+    }
+  }
+
+  /// 拉取 master playlist 并测速。失败时静默降级为「自动（单一流）」。
+  Future<void> _probeQuality() async {
+    final raw = _rawUrl;
+    final dio = _dio;
+    if (raw == null || dio == null || _probingQuality) return;
+    _probingQuality = true;
+    notifyListeners();
+    try {
+      final settings = _settings.settings;
+      final proxy = MediaApi.buildProxyUrl(
+        baseUrl: _server.baseUrl,
+        rawUrl: raw,
+        source: _context?.item.source ?? '',
+        playbackToken: settings.playbackToken,
+        adblock: settings.adblock,
+        proxySegments: settings.proxySegments,
+      );
+      final report = await HlsQualityProbe(dio).probe(
+        [proxy, raw],
+        baseUri: Uri.parse(raw),
+      );
+      // 探测期间可能已经切集/换源，结果只对发起时的地址有效。
+      if (_rawUrl != raw) return;
+      if (report.variants.isEmpty) {
+        _singleStreamQuality = report.singleStream || report.error == null;
+        _variants = const [];
+      } else {
+        _singleStreamQuality = false;
+        _variants = report.variants;
+      }
+    } on Object catch (error) {
+      if (kDebugMode) debugPrint('NEWTV quality probe failed: $error');
+      _singleStreamQuality = true;
+    } finally {
+      _probingQuality = false;
+      notifyListeners();
+    }
+  }
+
+  HlsVariant? _fastestVariant() {
+    final measured = _variants.where((variant) => variant.measured).toList();
+    if (measured.isEmpty) return _variants.isEmpty ? null : _variants.first;
+    measured.sort(
+      (a, b) => b.speedBytesPerSecond!.compareTo(a.speedBytesPerSecond!),
+    );
+    return measured.first;
+  }
+
+  /// 切换清晰度：用该变体的子 m3u8 重新起播，并回到原进度。
+  Future<void> selectQuality(String label) async {
+    if (label == _selectedQuality) return;
+    final context = _context;
+    if (context == null) return;
+    if (label == autoQualityLabel) {
+      final fastest = _fastestVariant();
+      if (fastest == null) {
+        _selectedQuality = autoQualityLabel;
+        notifyListeners();
+        await open(context);
+        return;
+      }
+      await _openVariant(fastest, label: autoQualityLabel);
+      return;
+    }
+    HlsVariant? variant;
+    for (final candidate in _variants) {
+      if (candidate.label == label) {
+        variant = candidate;
+        break;
+      }
+    }
+    if (variant == null) return;
+    await _openVariant(variant, label: variant.label);
+  }
+
+  Future<void> _openVariant(HlsVariant variant, {required String label}) async {
+    final context = _context;
+    final settings = _settings.settings;
+    final resume = _position;
+    final proxy = MediaApi.buildProxyUrl(
+      baseUrl: _server.baseUrl,
+      rawUrl: variant.url,
+      source: context?.item.source ?? '',
+      playbackToken: settings.playbackToken,
+      adblock: settings.adblock,
+      proxySegments: settings.proxySegments,
+    );
+    _candidates = sourceUriOf(variant.url) != null
+        // 服务端已把它重写成代理地址，直接用，避免二次包裹。
+        ? [variant.url]
+        : (proxy == variant.url ? [variant.url] : [proxy, variant.url]);
+    _candidateIndex = 0;
+    _selectedQuality = label;
+    _error = null;
+    _errorDetail = null;
+    _duration = Duration.zero;
+    _position = Duration.zero;
+    _pendingInitialSeek =
+        resume > const Duration(seconds: 2) ? resume : null;
+    notifyListeners();
+    if (kDebugMode) debugPrint('NEWTV switch quality ($label): ${_candidates.first}');
+    await _openUrl(_candidates.first);
   }
 
   /// 打开前用 dio 取回播放列表开头，判断服务端是否成功取流。

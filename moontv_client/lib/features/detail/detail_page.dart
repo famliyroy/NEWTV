@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:ui';
 
 import 'package:flutter/material.dart';
@@ -214,6 +215,35 @@ class _DetailPageState extends ConsumerState<DetailPage> {
     _checkFavorite();
   }
 
+  /// 手动搜索更多片源：命中组会追加进 `_sources` 并直接切换过去。
+  Future<void> _openSourceSearch() async {
+    final group = await showModalBottomSheet<List<MediaItem>>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Theme.of(context).colorScheme.surface,
+      builder: (_) => _SourceSearchSheet(initialQuery: _item.title),
+    );
+    if (group == null || group.isEmpty || !mounted) return;
+    final primary = _mergeMetadata(group.first, _item);
+    final merged = <MediaItem>[];
+    final seen = <String>{};
+    for (final item in [..._sources, ...group]) {
+      if (!seen.add(item.storageKey)) continue;
+      merged.add(
+        item.storageKey == primary.storageKey ? primary : _mergeMetadata(item, _item),
+      );
+    }
+    setState(() {
+      _sources = merged;
+      _selectedSource = primary;
+      _item = primary;
+      _selectedEpisode = primary.lastEpisodeIndex;
+      _emptySources.remove(primary.storageKey);
+    });
+    await _load(autoFallback: false);
+    await _checkFavorite();
+  }
+
   void _play() {
     final item = _item;
     if (item.episodes.isEmpty) return;
@@ -305,16 +335,34 @@ class _DetailPageState extends ConsumerState<DetailPage> {
                     ),
                     const SizedBox(height: 12),
                   ],
-                  if (_sources.length > 1) ...[
-                    Text('播放源', style: Theme.of(context).textTheme.titleMedium),
-                    const SizedBox(height: 10),
+                  // 播放源常驻展示：即使只命中 1 个源，也要让用户看到当前源与集数，
+                  // 并提供「搜索更多源」入口，否则单源时完全没有换源途径。
+                  Row(
+                    crossAxisAlignment: CrossAxisAlignment.end,
+                    children: [
+                      Text('播放源', style: Theme.of(context).textTheme.titleMedium),
+                      const Spacer(),
+                      TextButton.icon(
+                        onPressed: _resolvingSources ? null : _openSourceSearch,
+                        icon: const Icon(Icons.travel_explore, size: 18),
+                        label: const Text('搜索更多源'),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 6),
+                  if (_sources.isEmpty)
+                    Text(
+                      _resolvingSources ? '正在匹配片源…' : '尚未匹配到片源，可手动搜索',
+                      style: Theme.of(context).textTheme.bodySmall,
+                    )
+                  else
                     _SourceChips(
                       sources: _sources,
                       selected: _selectedSource,
+                      emptyKeys: _emptySources,
                       onSelected: _changeSource,
                     ),
-                    const SizedBox(height: 20),
-                  ],
+                  const SizedBox(height: 20),
                   Row(
                     crossAxisAlignment: CrossAxisAlignment.end,
                     children: [
@@ -551,11 +599,15 @@ class _SourceChips extends StatelessWidget {
   const _SourceChips({
     required this.sources,
     required this.selected,
+    required this.emptyKeys,
     required this.onSelected,
   });
 
   final List<MediaItem> sources;
   final MediaItem selected;
+
+  /// 详情接口返回 0 集的源（多为源站已失效），在 chip 上标注出来。
+  final Set<String> emptyKeys;
   final ValueChanged<MediaItem> onSelected;
 
   @override
@@ -569,13 +621,15 @@ class _SourceChips extends StatelessWidget {
         separatorBuilder: (context, index) => const SizedBox(width: 8),
         itemBuilder: (context, index) {
           final source = sources[index];
-          final isSelected = source.source == selected.source;
+          final isSelected = source.storageKey == selected.storageKey;
+          final name = source.sourceName.isEmpty ? source.source : source.sourceName;
+          final empty = emptyKeys.contains(source.storageKey);
           return ChoiceChip(
             selected: isSelected,
             label: Text(
-              source.episodes.isEmpty
-                  ? source.sourceName
-                  : '${source.sourceName} · ${source.episodes.length} 集',
+              empty
+                  ? '$name · 无选集'
+                  : '$name · ${source.episodes.length} 集',
             ),
             labelStyle: TextStyle(
               fontSize: 12,
@@ -585,6 +639,166 @@ class _SourceChips extends StatelessWidget {
             onSelected: (_) => onSelected(source),
           );
         },
+      ),
+    );
+  }
+}
+
+/// 手动搜索更多片源：把候选组按标题聚合展示，选中即把整组追加进详情页的源列表。
+class _SourceSearchSheet extends ConsumerStatefulWidget {
+  const _SourceSearchSheet({required this.initialQuery});
+
+  final String initialQuery;
+
+  @override
+  ConsumerState<_SourceSearchSheet> createState() => _SourceSearchSheetState();
+}
+
+class _SourceSearchSheetState extends ConsumerState<_SourceSearchSheet> {
+  late final TextEditingController _controller;
+  var _loading = false;
+  String? _error;
+  List<List<MediaItem>> _groups = const [];
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = TextEditingController(text: widget.initialQuery);
+    unawaited(_search());
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  Future<void> _search() async {
+    final keyword = _controller.text.trim();
+    if (keyword.isEmpty) return;
+    setState(() {
+      _loading = true;
+      _error = null;
+    });
+    try {
+      final results = await ref
+          .read(appDependenciesProvider)
+          .mediaRepository
+          .search(keyword);
+      if (!mounted) return;
+      final groups = groupByTitle(
+        results.where((item) => item.source.isNotEmpty),
+      )..sort((a, b) => b.length.compareTo(a.length));
+      setState(() {
+        _loading = false;
+        _groups = groups;
+      });
+    } on Object catch (error) {
+      if (!mounted) return;
+      setState(() {
+        _loading = false;
+        _error = readableError(error);
+      });
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Padding(
+      padding: EdgeInsets.only(bottom: MediaQuery.viewInsetsOf(context).bottom),
+      child: SizedBox(
+        height: MediaQuery.sizeOf(context).height * 0.72,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const SizedBox(height: 10),
+            Center(
+              child: Container(
+                width: 42,
+                height: 4,
+                decoration: BoxDecoration(
+                  color: theme.colorScheme.outline,
+                  borderRadius: BorderRadius.circular(99),
+                ),
+              ),
+            ),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(20, 14, 20, 0),
+              child: Text('搜索更多片源', style: theme.textTheme.titleMedium),
+            ),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(20, 10, 20, 8),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: TextField(
+                      controller: _controller,
+                      textInputAction: TextInputAction.search,
+                      onSubmitted: (_) => unawaited(_search()),
+                      decoration: const InputDecoration(
+                        isDense: true,
+                        hintText: '输入片名后搜索',
+                        prefixIcon: Icon(Icons.search, size: 20),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  FilledButton(
+                    onPressed: _loading ? null : () => unawaited(_search()),
+                    child: const Text('搜索'),
+                  ),
+                ],
+              ),
+            ),
+            if (_loading)
+              const Padding(
+                padding: EdgeInsets.symmetric(vertical: 24),
+                child: Center(child: CircularProgressIndicator()),
+              )
+            else if (_error != null)
+              Padding(
+                padding: const EdgeInsets.fromLTRB(20, 16, 20, 0),
+                child: Text(_error!, style: theme.textTheme.bodySmall),
+              )
+            else if (_groups.isEmpty)
+              Padding(
+                padding: const EdgeInsets.fromLTRB(20, 16, 20, 0),
+                child: Text('没有搜到其他片源，换个关键词试试', style: theme.textTheme.bodySmall),
+              )
+            else
+              Expanded(
+                child: ListView.builder(
+                  padding: const EdgeInsets.fromLTRB(12, 4, 12, 20),
+                  itemCount: _groups.length,
+                  itemBuilder: (context, index) {
+                    final group = _groups[index];
+                    final first = group.first;
+                    final names = group
+                        .map((item) => item.sourceName.isEmpty ? item.source : item.sourceName)
+                        .toSet()
+                        .take(4)
+                        .join('、');
+                    return ListTile(
+                      leading: const Icon(Icons.movie_outlined),
+                      title: Text(first.title, maxLines: 1, overflow: TextOverflow.ellipsis),
+                      subtitle: Text(
+                        [
+                          if (first.year.isNotEmpty) first.year,
+                          '${group.length} 个源',
+                          names,
+                        ].join(' · '),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                      trailing: const Icon(Icons.chevron_right),
+                      onTap: () => Navigator.of(context).pop(group),
+                    );
+                  },
+                ),
+              ),
+          ],
+        ),
       ),
     );
   }

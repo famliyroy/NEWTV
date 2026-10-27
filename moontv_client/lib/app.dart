@@ -18,14 +18,6 @@ import 'features/search/search_page.dart';
 import 'features/settings/settings_page.dart';
 import 'providers.dart';
 
-final sessionProvider = ChangeNotifierProvider<SessionManager>(
-  (ref) => ref.watch(appDependenciesProvider).session,
-);
-
-final settingsProvider = ChangeNotifierProvider(
-  (ref) => ref.watch(appDependenciesProvider).settings,
-);
-
 final routerProvider = Provider<GoRouter>((ref) {
   final session = ref.watch(sessionProvider);
   final router = GoRouter(

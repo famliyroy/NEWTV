@@ -1,15 +1,23 @@
 enum DanmakuMode { scroll, bottom, top }
 
 class DanmakuEpisode {
-  const DanmakuEpisode({required this.episodeId, required this.episodeTitle});
+  const DanmakuEpisode({
+    required this.episodeId,
+    required this.episodeTitle,
+    this.url = '',
+  });
 
   final String episodeId;
   final String episodeTitle;
+
+  /// 原始播放地址（LogVar 等聚合源的 `comment` 接口要求传完整 http(s) 地址）。
+  final String url;
 
   factory DanmakuEpisode.fromJson(Map<String, dynamic> json) {
     return DanmakuEpisode(
       episodeId: '${json['episodeId'] ?? ''}',
       episodeTitle: '${json['episodeTitle'] ?? ''}',
+      url: '${json['url'] ?? ''}',
     );
   }
 }

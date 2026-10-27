@@ -4,6 +4,24 @@
 
 ## [Unreleased]
 
+## [0.1.4] - 2026-10-27
+
+### Fixed
+
+- **改完设置不生效，必须退回上级页面甚至重开 APP**：根因是全 APP 取设置都用了一次性快照——`appDependenciesProvider` 引用的对象永远不变，它内部 `SettingsController` 的通知无法触发重建，只有 `app.dart` 的主题正确 watch 了。现在：
+  - `settingsProvider` / `sessionProvider` 收敛到 `providers.dart` 并以 `ChangeNotifierProvider<SettingsController>` 暴露，播放页、设置页、弹幕设置 sheet 全部改为 `ref.watch`，拖动滑块自身立即刷新。
+  - `PlayerController` 改为持有 `SettingsController`（而非值快照），构建 `/api/proxy-m3u8` 时**每次现场读** `adblock` / `proxySegments` / `playbackToken`，播放中改去广告开关后点重试即按新值走。
+  - 弹幕开关收敛为单一事实来源：播放页按钮、设置页开关、sheet 里的开关都写 `danmakuEnabled`，胶囊与 overlay 同步变化；从关到开时自动补一次加载。
+- **沉浸态仍有 UI 残留**：`_ProgressBar` 此前收起时只是从 `bottom: 76` 移到 `12` 继续显示，现在与控制栏一起 `Opacity 0 + IgnorePointer` 淡出；弹幕状态胶囊改为瞬时提示（成功 3 秒、失败 5 秒自动消失，此前 `_status` 永不清空导致常驻右下角），并跟随控制栏显隐。
+
+### Added
+
+- **弹幕服务可切换**：设置页新增「弹幕服务」区块，可在 `MoonTVPlus 后端`（默认）与`自定义弹幕 API`之间单选，后者可填 base URL 并「测试连通」。新增 `DanmakuSource` 抽象，落地自建 LogVar 弹幕 API 实现（`/api/v2/search/anime`、`/api/v2/bangumi/{id}`、`/api/v2/comment?url=<完整地址>`），适配该服务 `p` 只有 4 段（时间,模式,颜色,池）的格式；请求串行化并保证间隔 ≥1.1s、429 指数退避重试；该源本身已是多源聚合，自动跳过客户端多源合并，且使用独立缓存键避免与后端弹幕串味。
+- **详情页播放源常驻 + 搜索更多源**：即使只命中 1 个源也展示「源名 · N 集」与选中态；新增「搜索更多源」弹层，按标题聚合展示所有候选组，选中即把整组追加进源列表并切换。失效源（详情返回 0 集）在 chip 上标注「无选集」。
+- **播放页换源**：控制栏新增换源按钮（失败页的「切换播放源」保留），换源后保留当前集号并对齐到新源的同一集，同时重新加载弹幕。
+- **清晰度切换与测速**：起播后后台经 `/api/proxy-m3u8` 取 master playlist，解析 `#EXT-X-STREAM-INF` 变体（BANDWIDTH / RESOLUTION），对每个变体的首个分片发 `Range: bytes=0-262143` 请求实测速率并在菜单里显示（如 `1080P · 2.3 MB/s`）；选择后切到该变体的子 m3u8 并回到原进度，「自动」取测速最优；单码率只显示「自动（单一流）」，不报错。
+- 设置页新增「沉浸模式保留迷你进度条」（默认关）。
+
 ## [0.1.3] - 2026-10-27
 
 ### Fixed

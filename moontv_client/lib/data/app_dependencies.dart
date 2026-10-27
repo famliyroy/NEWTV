@@ -12,7 +12,9 @@ import '../../core/config/server_config.dart';
 import '../../core/network/dio_client.dart';
 import '../../core/utils/image_url.dart';
 import 'api/auth_api.dart';
+import 'api/danmaku_api.dart';
 import 'api/media_api.dart';
+import 'repositories/danmaku_repository.dart';
 import 'repositories/media_repository.dart';
 
 class AppDependencies {
@@ -26,6 +28,7 @@ class AppDependencies {
     required this.dioClient,
     required this.authApi,
     required this.mediaRepository,
+    required this.danmakuRepository,
   });
 
   final SharedPreferences preferences;
@@ -37,6 +40,7 @@ class AppDependencies {
   final DioClient dioClient;
   final AuthApi authApi;
   final MediaRepository mediaRepository;
+  final DanmakuRepository danmakuRepository;
 
   static Future<AppDependencies> create() async {
     final preferences = await SharedPreferences.getInstance();
@@ -77,6 +81,10 @@ class AppDependencies {
       dioClient: dioClient,
       authApi: AuthApi(dio),
       mediaRepository: MediaRepository(MediaApi(dio)),
+      // 数据源按设置动态切换（后端聚合 / 自建 LogVar）。
+      danmakuRepository: DanmakuRepository(
+        SwitchableDanmakuSource(settings, dio),
+      ),
     );
   }
 }

@@ -5,10 +5,18 @@ import '../../domain/models/danmaku.dart';
 import 'danmaku_controller.dart';
 
 class DanmakuOverlay extends StatelessWidget {
-  const DanmakuOverlay({required this.controller, required this.settings, super.key});
+  const DanmakuOverlay({
+    required this.controller,
+    required this.settings,
+    this.showStatus = true,
+    super.key,
+  });
 
   final DanmakuController controller;
   final AppSettings settings;
+
+  /// 与控制栏同步隐藏：沉浸态下不保留任何 UI 元素。
+  final bool showStatus;
 
   @override
   Widget build(BuildContext context) {
@@ -16,6 +24,10 @@ class DanmakuOverlay extends StatelessWidget {
       child: AnimatedBuilder(
         animation: controller,
         builder: (context, child) {
+          final status = controller.loading && controller.status.isEmpty
+              ? '弹幕加载中…'
+              : controller.status;
+          final visible = showStatus && status.isNotEmpty;
           return Stack(
             fit: StackFit.expand,
             children: [
@@ -30,19 +42,22 @@ class DanmakuOverlay extends StatelessWidget {
               Positioned(
                 right: 12,
                 bottom: 46,
-                child: AnimatedOpacity(
-                  opacity: controller.loading || controller.status.isNotEmpty ? 1 : 0,
-                  duration: const Duration(milliseconds: 180),
-                  child: DecoratedBox(
-                    decoration: BoxDecoration(
-                      color: Colors.black.withValues(alpha: 0.48),
-                      borderRadius: BorderRadius.circular(999),
-                    ),
-                    child: Padding(
-                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
-                      child: Text(
-                        controller.status,
-                        style: const TextStyle(color: Colors.white, fontSize: 11),
+                child: IgnorePointer(
+                  ignoring: !visible,
+                  child: AnimatedOpacity(
+                    opacity: visible ? 1 : 0,
+                    duration: const Duration(milliseconds: 180),
+                    child: DecoratedBox(
+                      decoration: BoxDecoration(
+                        color: Colors.black.withValues(alpha: 0.48),
+                        borderRadius: BorderRadius.circular(999),
+                      ),
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                        child: Text(
+                          status,
+                          style: const TextStyle(color: Colors.white, fontSize: 11),
+                        ),
                       ),
                     ),
                   ),

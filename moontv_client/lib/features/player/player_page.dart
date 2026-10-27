@@ -9,8 +9,6 @@ import 'package:media_kit_video/media_kit_video.dart';
 import 'package:window_manager/window_manager.dart';
 
 import '../../core/player/player_controller.dart';
-import '../../data/api/danmaku_api.dart';
-import '../../data/repositories/danmaku_repository.dart';
 import '../../domain/models/media_item.dart';
 import '../../providers.dart';
 import '../danmaku/danmaku_controller.dart';
@@ -43,18 +41,15 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
     super.initState();
     _currentPlayback = widget.playback;
     final dependencies = ref.read(appDependenciesProvider);
-    final settings = dependencies.settings.settings;
     final server = dependencies.session.server!;
     _player = PlayerController(
       server: server,
-      settings: settings,
+      // 传 storage 而不是值快照：去广告/代理分片/令牌改完无需重进页面。
+      settings: dependencies.settings,
       dio: dependencies.dioClient.dio,
       onCompleted: _handleEpisodeCompleted,
     );
-    _danmaku = DanmakuController(
-      DanmakuRepository(DanmakuApi(dependencies.dioClient.dio)),
-      dependencies.settings,
-    );
+    _danmaku = DanmakuController(dependencies.danmakuRepository, dependencies.settings);
     _player.addListener(() => _danmaku.setPosition(_player.position.inMilliseconds / 1000));
     unawaited(_player.open(_currentPlayback));
     unawaited(_danmaku.loadFor(_currentPlayback));
@@ -84,7 +79,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
 
   void _handleEpisodeCompleted() {
     unawaited(_syncPlayProgress());
-    final settings = ref.read(appDependenciesProvider).settings.settings;
+    final settings = ref.read(settingsProvider).settings;
     if (settings.autoplayNext && _player.hasNextEpisode) {
       unawaited(_switchEpisode(_currentPlayback.episodeIndex + 1));
     }
@@ -105,7 +100,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
     unawaited(_danmaku.loadFor(nextContext));
   }
 
-  /// 播放失败后直接换一个片源重试，不必退回详情页。
+  /// 换源：保留当前集号（对齐到新源的同一集），不必退回详情页。
   Future<void> _pickSource() async {
     final sources = _currentPlayback.availableSources
         .where((item) => item.episodes.isNotEmpty)
@@ -142,7 +137,8 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
     );
     if (picked == null || !mounted) return;
     await _syncPlayProgress().catchError((_) {});
-    final index = picked.lastEpisodeIndex.clamp(0, picked.episodes.length - 1);
+    final index =
+        _currentPlayback.episodeIndex.clamp(0, picked.episodes.length - 1);
     final next = PlaybackContext(
       item: picked,
       episodeIndex: index,
@@ -247,7 +243,8 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
 
   @override
   Widget build(BuildContext context) {
-    final settings = ref.watch(appDependenciesProvider).settings.settings;
+    // watch（不是 read）：设置在播放中改动要立即反映到弹幕/沉浸样式。
+    final settings = ref.watch(settingsProvider).settings;
     return PopScope(
       canPop: false,
       onPopInvokedWithResult: (didPop, result) {
@@ -296,7 +293,12 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
                       fit: _videoFit,
                       controls: (state) => const SizedBox.shrink(),
                     ),
-                    DanmakuOverlay(controller: _danmaku, settings: settings),
+                    DanmakuOverlay(
+                      controller: _danmaku,
+                      settings: settings,
+                      // 控制栏收起时，弹幕状态胶囊一并隐藏。
+                      showStatus: _controlsVisible,
+                    ),
                     AnimatedBuilder(
                       animation: _player,
                       builder: (context, child) => _PlayerStatus(
@@ -310,7 +312,9 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
                       player: _player,
                       danmaku: _danmaku,
                       visible: _controlsVisible,
+                      miniProgress: settings.immersiveMiniProgress,
                       title: '${_currentPlayback.item.title} · ${_currentPlayback.item.episodeLabel(_currentPlayback.episodeIndex)}',
+                      canSwitchSource: _currentPlayback.availableSources.length > 1,
                       onBack: _exitPage,
                       onToggle: () => unawaited(_player.toggle()),
                       onSeek: (value) => unawaited(_player.seek(value)),
@@ -321,6 +325,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
                           : null,
                       onRateChanged: (rate) => unawaited(_player.setRate(rate)),
                       onCycleFit: _cycleVideoFit,
+                      onSwitchSource: _pickSource,
                       onToggleDanmaku: () => _danmaku.setEnabled(!_danmaku.enabled),
                       onDanmakuSettings: () {
                         showModalBottomSheet<void>(
@@ -328,6 +333,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
                           isScrollControlled: true,
                           builder: (context) => const DanmakuSettingsSheet(),
                         );
+                        _showControls();
                       },
                       onInteract: _showControls,
                     ),
@@ -408,7 +414,9 @@ class _ControlsOverlay extends StatelessWidget {
     required this.player,
     required this.danmaku,
     required this.visible,
+    required this.miniProgress,
     required this.title,
+    required this.canSwitchSource,
     required this.onBack,
     required this.onToggle,
     required this.onSeek,
@@ -417,6 +425,7 @@ class _ControlsOverlay extends StatelessWidget {
     required this.onNextEpisode,
     required this.onRateChanged,
     required this.onCycleFit,
+    required this.onSwitchSource,
     required this.onToggleDanmaku,
     required this.onDanmakuSettings,
     required this.onInteract,
@@ -425,7 +434,11 @@ class _ControlsOverlay extends StatelessWidget {
   final PlayerController player;
   final DanmakuController danmaku;
   final bool visible;
+
+  /// 沉浸态保留一条极细进度条（默认关）。
+  final bool miniProgress;
   final String title;
+  final bool canSwitchSource;
   final VoidCallback onBack;
   final VoidCallback onToggle;
   final ValueChanged<Duration> onSeek;
@@ -434,6 +447,7 @@ class _ControlsOverlay extends StatelessWidget {
   final VoidCallback? onNextEpisode;
   final ValueChanged<double> onRateChanged;
   final VoidCallback onCycleFit;
+  final VoidCallback onSwitchSource;
   final VoidCallback onToggleDanmaku;
   final VoidCallback onDanmakuSettings;
   final VoidCallback onInteract;
@@ -445,18 +459,46 @@ class _ControlsOverlay extends StatelessWidget {
       builder: (context, child) {
         final duration = player.duration;
         final position = player.position;
+        final fraction = duration.inMilliseconds <= 0
+            ? 0.0
+            : (position.inMilliseconds / duration.inMilliseconds).clamp(0.0, 1.0);
         return Stack(
           fit: StackFit.expand,
           children: [
+            // 沉浸态：可选择保留一条 2px 的进度细线，否则完全无 UI。
+            if (miniProgress && !visible)
+              Positioned(
+                left: 0,
+                right: 0,
+                bottom: 0,
+                child: IgnorePointer(
+                  child: SizedBox(
+                    height: 2,
+                    child: LinearProgressIndicator(
+                      value: fraction,
+                      backgroundColor: Colors.white12,
+                      valueColor: const AlwaysStoppedAnimation(Colors.white70),
+                    ),
+                  ),
+                ),
+              ),
+            // 进度条与控制栏一同淡出：收起时不再贴在底部常驻。
             Positioned(
               left: 24,
               right: 24,
-              bottom: visible ? 76 : 12,
-              child: _ProgressBar(
-                position: position,
-                duration: duration,
-                onChanged: onSeek,
-                onInteract: onInteract,
+              bottom: 76,
+              child: IgnorePointer(
+                ignoring: !visible,
+                child: AnimatedOpacity(
+                  opacity: visible ? 1 : 0,
+                  duration: const Duration(milliseconds: 180),
+                  child: _ProgressBar(
+                    position: position,
+                    duration: duration,
+                    onChanged: onSeek,
+                    onInteract: onInteract,
+                  ),
+                ),
               ),
             ),
             Positioned.fill(
@@ -492,6 +534,13 @@ class _ControlsOverlay extends StatelessWidget {
                                   style: const TextStyle(color: Colors.white, fontSize: 17, fontWeight: FontWeight.w600),
                                 ),
                               ),
+                              if (canSwitchSource)
+                                IconButton.filledTonal(
+                                  tooltip: '切换播放源',
+                                  onPressed: onSwitchSource,
+                                  icon: const Icon(Icons.swap_horiz),
+                                ),
+                              const SizedBox(width: 8),
                               IconButton.filledTonal(
                                 tooltip: '切换画面比例',
                                 onPressed: onCycleFit,
@@ -527,6 +576,8 @@ class _ControlsOverlay extends StatelessWidget {
                               children: [
                                 Text(_format(position), style: const TextStyle(color: Colors.white70)),
                                 const Spacer(),
+                                _QualityButton(player: player),
+                                const SizedBox(width: 6),
                                 PopupMenuButton<double>(
                                   tooltip: '倍速',
                                   initialValue: player.rate,
@@ -586,6 +637,103 @@ class _ControlsOverlay extends StatelessWidget {
     final minutes = duration.inMinutes.remainder(60).toString().padLeft(2, '0');
     final seconds = duration.inSeconds.remainder(60).toString().padLeft(2, '0');
     return hours > 0 ? '$hours:$minutes:$seconds' : '$minutes:$seconds';
+  }
+}
+
+/// 清晰度入口：单码率只显示「自动（单一流）」，不做报错。
+class _QualityButton extends StatelessWidget {
+  const _QualityButton({required this.player});
+
+  final PlayerController player;
+
+  @override
+  Widget build(BuildContext context) {
+    final variants = player.variants;
+    if (variants.isEmpty) {
+      if (player.probingQuality) {
+        return const Padding(
+          padding: EdgeInsets.symmetric(horizontal: 8),
+          child: SizedBox.square(
+            dimension: 14,
+            child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white54),
+          ),
+        );
+      }
+      if (player.singleStreamQuality) {
+        // 单码率：只提示存在单一流，不提供无意义的切换菜单。
+        return const Padding(
+          padding: EdgeInsets.symmetric(horizontal: 8),
+          child: Text(
+            '自动（单一流）',
+            style: TextStyle(color: Colors.white60, fontSize: 12),
+          ),
+        );
+      }
+      return const SizedBox.shrink();
+    }
+    final items = <PopupMenuEntry<String>>[      PopupMenuItem(
+        value: PlayerController.autoQualityLabel,
+        child: _QualityRow(
+          label: PlayerController.autoQualityLabel,
+          hint: '取测速最优',
+          selected: player.selectedQuality == PlayerController.autoQualityLabel,
+        ),
+      ),
+      const PopupMenuDivider(),
+      for (final variant in variants)
+        PopupMenuItem(
+          value: variant.label,
+          child: _QualityRow(
+            label: variant.label,
+            hint: variant.speedLabel,
+            selected: player.selectedQuality == variant.label,
+          ),
+        ),
+    ];
+    return PopupMenuButton<String>(
+      tooltip: '清晰度',
+      onSelected: (value) => unawaited(player.selectQuality(value)),
+      itemBuilder: (context) => items,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Icon(Icons.high_quality_outlined, size: 16, color: Colors.white70),
+            const SizedBox(width: 4),
+            Text(
+              player.selectedQuality,
+              style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w600),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _QualityRow extends StatelessWidget {
+  const _QualityRow({required this.label, required this.hint, required this.selected});
+
+  final String label;
+  final String hint;
+  final bool selected;
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      children: [
+        Icon(
+          selected ? Icons.check : Icons.circle_outlined,
+          size: 16,
+          color: selected ? Theme.of(context).colorScheme.primary : Colors.transparent,
+        ),
+        const SizedBox(width: 8),
+        Text(label),
+        const Spacer(),
+        Text(hint, style: Theme.of(context).textTheme.bodySmall),
+      ],
+    );
   }
 }
 

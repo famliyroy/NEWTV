@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../core/config/app_settings.dart';
 import '../../providers.dart';
 
 class DanmakuSettingsSheet extends ConsumerWidget {
@@ -8,8 +9,13 @@ class DanmakuSettingsSheet extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final dependencies = ref.read(appDependenciesProvider);
-    final settings = dependencies.settings.settings;
+    // 必须 watch：设置是 ChangeNotifier，read 拿到的是一次性快照，
+    // 拖滑块时连自己的 UI 都不会刷新。
+    final storage = ref.watch(settingsProvider);
+    final settings = storage.settings;
+    void update(AppSettingsBuilder change) =>
+        storage.update(change(settings));
+
     return SafeArea(
       child: ListView(
         shrinkWrap: true,
@@ -31,7 +37,8 @@ class DanmakuSettingsSheet extends ConsumerWidget {
             contentPadding: EdgeInsets.zero,
             title: const Text('启用弹幕'),
             value: settings.danmakuEnabled,
-            onChanged: (value) => dependencies.settings.update(settings.copyWith(danmakuEnabled: value)),
+            onChanged: (value) =>
+                update((current) => current.copyWith(danmakuEnabled: value)),
           ),
           _SliderTile(
             title: '字号',
@@ -39,7 +46,8 @@ class DanmakuSettingsSheet extends ConsumerWidget {
             min: 18,
             max: 40,
             label: '${settings.danmakuFontSize.round()}',
-            onChanged: (value) => dependencies.settings.update(settings.copyWith(danmakuFontSize: value)),
+            onChanged: (value) =>
+                update((current) => current.copyWith(danmakuFontSize: value)),
           ),
           _SliderTile(
             title: '速度',
@@ -47,7 +55,8 @@ class DanmakuSettingsSheet extends ConsumerWidget {
             min: 0.5,
             max: 2,
             label: '${settings.danmakuSpeed.toStringAsFixed(1)}x',
-            onChanged: (value) => dependencies.settings.update(settings.copyWith(danmakuSpeed: value)),
+            onChanged: (value) =>
+                update((current) => current.copyWith(danmakuSpeed: value)),
           ),
           _SliderTile(
             title: '透明度',
@@ -55,7 +64,8 @@ class DanmakuSettingsSheet extends ConsumerWidget {
             min: 0.2,
             max: 1,
             label: '${(settings.danmakuOpacity * 100).round()}%',
-            onChanged: (value) => dependencies.settings.update(settings.copyWith(danmakuOpacity: value)),
+            onChanged: (value) =>
+                update((current) => current.copyWith(danmakuOpacity: value)),
           ),
           _SliderTile(
             title: '显示区域',
@@ -63,7 +73,8 @@ class DanmakuSettingsSheet extends ConsumerWidget {
             min: 0.25,
             max: 1,
             label: '${(settings.danmakuArea * 100).round()}%',
-            onChanged: (value) => dependencies.settings.update(settings.copyWith(danmakuArea: value)),
+            onChanged: (value) =>
+                update((current) => current.copyWith(danmakuArea: value)),
           ),
           ListTile(
             contentPadding: EdgeInsets.zero,
@@ -76,7 +87,7 @@ class DanmakuSettingsSheet extends ConsumerWidget {
                   .toList(),
               onChanged: (value) {
                 if (value != null) {
-                  dependencies.settings.update(settings.copyWith(danmakuMaxSources: value));
+                  update((current) => current.copyWith(danmakuMaxSources: value));
                 }
               },
             ),
@@ -87,13 +98,16 @@ class DanmakuSettingsSheet extends ConsumerWidget {
               labelText: '屏蔽词',
               hintText: '多个词用逗号分隔',
             ),
-            onChanged: (value) => dependencies.settings.update(settings.copyWith(blockedWords: value)),
+            onChanged: (value) =>
+                update((current) => current.copyWith(blockedWords: value)),
           ),
         ],
       ),
     );
   }
 }
+
+typedef AppSettingsBuilder = AppSettings Function(AppSettings current);
 
 class _SliderTile extends StatelessWidget {
   const _SliderTile({

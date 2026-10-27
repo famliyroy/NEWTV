@@ -98,7 +98,7 @@ class DanmakuRepository {
   static const maxConcurrency = 6;
   static const sourceTimeout = Duration(seconds: 8);
   static const totalBudget = Duration(seconds: 12);
-  final DanmakuApi _api;
+  final DanmakuSource _api;
   final DanmakuCache _cache;
 
   Future<DanmakuLoadResult> load({
@@ -120,7 +120,7 @@ class DanmakuRepository {
       );
     }
     if (allowCache) {
-      final cached = await _cache.read(cleanTitle, episodeNumber);
+      final cached = await _cache.read(_cacheKey(cleanTitle), episodeNumber);
       if (cached != null) {
         return DanmakuLoadResult(
           comments: cached,
@@ -141,6 +141,19 @@ class DanmakuRepository {
         totalSources: 0,
         fromCache: false,
         message: '未找到该作品的弹幕',
+      );
+    }
+
+    // 自建聚合弹幕源（LogVar）已经做了多源合并，再叠加客户端聚合只会
+    // 重复请求并触发 429，因此这里只取首个能匹配上集数的条目。
+    if (!_api.aggregates) {
+      return _loadFirstMatch(
+        cleanTitle: cleanTitle,
+        title: title,
+        episodeNumber: episodeNumber,
+        totalEpisodes: totalEpisodes,
+        animes: animes,
+        onProgress: onProgress,
       );
     }
 
@@ -173,7 +186,7 @@ class DanmakuRepository {
     var commentCount = 0;
     await _withConcurrency(matched, maxConcurrency, (item) async {
       final comments = await _api.comments(
-        item.episode.episodeId,
+        item.episode,
         source: item.anime.source,
         timeout: sourceTimeout,
       );
@@ -190,7 +203,7 @@ class DanmakuRepository {
     final usable = sourceResults.whereType<DanmakuSourceComments>().toList();
     final merged = mergeDanmaku(usable);
     if (merged.isNotEmpty) {
-      await _cache.write(cleanTitle, episodeNumber, merged);
+      await _cache.write(_cacheKey(cleanTitle), episodeNumber, merged);
     }
     return DanmakuLoadResult(
       comments: merged,
@@ -198,6 +211,56 @@ class DanmakuRepository {
       totalSources: animes.length,
       fromCache: false,
       message: usable.isEmpty ? '弹幕源暂时不可用' : '',
+    );
+  }
+
+  /// 不同数据源的弹幕不能互相命中缓存，否则切到自定义源会看到旧数据。
+  String _cacheKey(String cleanTitle) =>
+      _api.aggregates ? cleanTitle : 'logvar::$cleanTitle';
+
+  /// 聚合源模式：只命中一个作品，失败不回头再刷（避免 429）。
+  Future<DanmakuLoadResult> _loadFirstMatch({
+    required String cleanTitle,
+    required String title,
+    required double episodeNumber,
+    required int? totalEpisodes,
+    required List<DanmakuAnime> animes,
+    DanmakuProgress? onProgress,
+  }) async {
+    onProgress?.call(0, 1, 0);
+    for (final anime in animes.take(3)) {
+      final episodes = await _api.episodes(anime.animeId, timeout: sourceTimeout).catchError(
+        (Object _) => const <DanmakuEpisode>[],
+      );
+      final matched = matchEpisode(
+        episodes: episodes,
+        episodeNumber: episodeNumber,
+        totalEpisodes: totalEpisodes,
+        sourceTitle: anime.animeTitle,
+        targetTitle: title,
+      );
+      if (matched == null) continue;
+      final comments = await _api.comments(
+        matched,
+        source: anime.source,
+        timeout: sourceTimeout,
+      );
+      if (comments.isEmpty) continue;
+      onProgress?.call(1, 1, comments.length);
+      await _cache.write(_cacheKey(cleanTitle), episodeNumber, comments);
+      return DanmakuLoadResult(
+        comments: comments,
+        loadedSources: 1,
+        totalSources: 1,
+        fromCache: false,
+      );
+    }
+    return DanmakuLoadResult(
+      comments: const [],
+      loadedSources: 0,
+      totalSources: 1,
+      fromCache: false,
+      message: '未找到该集的弹幕',
     );
   }
 

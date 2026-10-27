@@ -19,7 +19,13 @@ class AppSettings {
     this.adblock = false,
     this.proxySegments = false,
     this.playbackToken = '',
+    this.immersiveMiniProgress = false,
+    this.danmakuApiMode = 0,
+    this.danmakuApiBaseUrl = defaultDanmakuApiBaseUrl,
   });
+
+  /// 自建 LogVar 弹幕服务的默认地址（路径令牌即鉴权）。
+  static const defaultDanmakuApiBaseUrl = 'http://35.212.231.252:9321/87654321';
 
   final int themeModeIndex;
   final bool reduceMotion;
@@ -36,6 +42,15 @@ class AppSettings {
   final bool proxySegments;
   final String playbackToken;
 
+  /// 沉浸态（控制栏隐藏）时是否保留一条极细的进度指示。
+  final bool immersiveMiniProgress;
+
+  /// 弹幕数据源：0 = MoonTVPlus 后端，1 = 自定义 LogVar API。
+  final int danmakuApiMode;
+  final String danmakuApiBaseUrl;
+
+  bool get useCustomDanmakuApi => danmakuApiMode == 1;
+
   AppSettings copyWith({
     int? themeModeIndex,
     bool? reduceMotion,
@@ -51,6 +66,9 @@ class AppSettings {
     bool? adblock,
     bool? proxySegments,
     String? playbackToken,
+    bool? immersiveMiniProgress,
+    int? danmakuApiMode,
+    String? danmakuApiBaseUrl,
   }) {
     return AppSettings(
       themeModeIndex: themeModeIndex ?? this.themeModeIndex,
@@ -67,6 +85,10 @@ class AppSettings {
       adblock: adblock ?? this.adblock,
       proxySegments: proxySegments ?? this.proxySegments,
       playbackToken: playbackToken ?? this.playbackToken,
+      immersiveMiniProgress:
+          immersiveMiniProgress ?? this.immersiveMiniProgress,
+      danmakuApiMode: danmakuApiMode ?? this.danmakuApiMode,
+      danmakuApiBaseUrl: danmakuApiBaseUrl ?? this.danmakuApiBaseUrl,
     );
   }
 }
@@ -88,6 +110,11 @@ class SettingsController extends ChangeNotifier {
       adblock: _preferences.getBool('adblock') ?? false,
       proxySegments: _preferences.getBool('proxySegments') ?? false,
       playbackToken: _preferences.getString('playbackToken') ?? '',
+      immersiveMiniProgress:
+          _preferences.getBool('immersiveMiniProgress') ?? false,
+      danmakuApiMode: _preferences.getInt('danmakuApiMode') ?? 0,
+      danmakuApiBaseUrl: _preferences.getString('danmakuApiBaseUrl') ??
+          AppSettings.defaultDanmakuApiBaseUrl,
     );
   }
 
@@ -113,6 +140,9 @@ class SettingsController extends ChangeNotifier {
       _preferences.setBool('adblock', value.adblock),
       _preferences.setBool('proxySegments', value.proxySegments),
       _preferences.setString('playbackToken', value.playbackToken),
+      _preferences.setBool('immersiveMiniProgress', value.immersiveMiniProgress),
+      _preferences.setInt('danmakuApiMode', value.danmakuApiMode),
+      _preferences.setString('danmakuApiBaseUrl', value.danmakuApiBaseUrl),
     ]);
   }
 }
