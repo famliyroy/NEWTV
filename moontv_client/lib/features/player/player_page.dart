@@ -48,6 +48,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
     _player = PlayerController(
       server: server,
       settings: settings,
+      dio: dependencies.dioClient.dio,
       onCompleted: _handleEpisodeCompleted,
     );
     _danmaku = DanmakuController(
@@ -102,6 +103,55 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
     setState(() => _currentPlayback = nextContext);
     unawaited(_player.open(nextContext));
     unawaited(_danmaku.loadFor(nextContext));
+  }
+
+  /// 播放失败后直接换一个片源重试，不必退回详情页。
+  Future<void> _pickSource() async {
+    final sources = _currentPlayback.availableSources
+        .where((item) => item.episodes.isNotEmpty)
+        .toList();
+    if (sources.length < 2) return;
+    final picked = await showModalBottomSheet<MediaItem>(
+      context: context,
+      builder: (sheetContext) => SafeArea(
+        child: ListView(
+          shrinkWrap: true,
+          children: [
+            const ListTile(
+              dense: true,
+              title: Text('切换播放源'),
+            ),
+            for (final item in sources)
+              ListTile(
+                leading: Icon(
+                  item.source == _currentPlayback.item.source
+                      ? Icons.check_circle
+                      : Icons.movie_outlined,
+                ),
+                title: Text(
+                  item.sourceName.isEmpty ? item.source : item.sourceName,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+                subtitle: Text('共 ${item.episodes.length} 集'),
+                onTap: () => Navigator.of(sheetContext).pop(item),
+              ),
+          ],
+        ),
+      ),
+    );
+    if (picked == null || !mounted) return;
+    await _syncPlayProgress().catchError((_) {});
+    final index = picked.lastEpisodeIndex.clamp(0, picked.episodes.length - 1);
+    final next = PlaybackContext(
+      item: picked,
+      episodeIndex: index,
+      availableSources: _currentPlayback.availableSources,
+    );
+    _danmaku.clear();
+    setState(() => _currentPlayback = next);
+    unawaited(_player.open(next));
+    unawaited(_danmaku.loadFor(next));
   }
 
   void _enterImmersiveMode() {
@@ -249,7 +299,12 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
                     DanmakuOverlay(controller: _danmaku, settings: settings),
                     AnimatedBuilder(
                       animation: _player,
-                      builder: (context, child) => _PlayerStatus(player: _player),
+                      builder: (context, child) => _PlayerStatus(
+                        player: _player,
+                        onSwitchSource: _currentPlayback.availableSources.length > 1
+                            ? _pickSource
+                            : null,
+                      ),
                     ),
                     _ControlsOverlay(
                       player: _player,
@@ -288,9 +343,10 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
 }
 
 class _PlayerStatus extends StatelessWidget {
-  const _PlayerStatus({required this.player});
+  const _PlayerStatus({required this.player, this.onSwitchSource});
 
   final PlayerController player;
+  final VoidCallback? onSwitchSource;
 
   @override
   Widget build(BuildContext context) {
@@ -316,11 +372,23 @@ class _PlayerStatus extends StatelessWidget {
                   style: const TextStyle(color: Colors.white54, fontSize: 11),
                 ),
               ],
-              const SizedBox(height: 12),
-              Row(
-                mainAxisSize: MainAxisSize.min,
+              const SizedBox(height: 16),
+              Wrap(
+                spacing: 12,
+                runSpacing: 8,
+                alignment: WrapAlignment.center,
                 children: [
                   FilledButton(onPressed: player.retry, child: const Text('重试')),
+                  if (onSwitchSource != null)
+                    OutlinedButton.icon(
+                      onPressed: onSwitchSource,
+                      icon: const Icon(Icons.swap_horiz, size: 18),
+                      label: const Text('切换播放源'),
+                      style: OutlinedButton.styleFrom(
+                        foregroundColor: Colors.white,
+                        side: const BorderSide(color: Colors.white54),
+                      ),
+                    ),
                 ],
               ),
             ],

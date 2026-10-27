@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import '../../core/utils/debouncer.dart';
+import '../../core/utils/media_grouping.dart';
 import '../../data/repositories/search_history_store.dart';
 import '../../domain/models/media_item.dart';
 import '../../providers.dart';
@@ -76,16 +77,7 @@ class _SearchPageState extends ConsumerState<SearchPage> {
     }
   }
 
-  List<List<MediaItem>> _grouped() {
-    final groups = <String, List<MediaItem>>{};
-    for (final item in _results) {
-      groups.putIfAbsent(item.title, () => []).add(item);
-    }
-    return groups.values.map((group) {
-      final sorted = List<MediaItem>.of(group)..sort((a, b) => b.weight.compareTo(a.weight));
-      return sorted;
-    }).toList();
-  }
+  List<List<MediaItem>> _grouped() => groupByTitle(_results);
 
   @override
   Widget build(BuildContext context) {

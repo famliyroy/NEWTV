@@ -1,27 +1,45 @@
 import 'dart:async';
+import 'dart:convert';
 
+import 'package:dio/dio.dart';
 import 'package:flutter/foundation.dart';
 import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
 
 import '../../core/config/app_settings.dart';
 import '../../core/config/server_config.dart';
+import '../../core/network/api_exception.dart';
 import '../../data/api/media_api.dart';
 import '../../domain/models/media_item.dart';
+
+/// 播放请求统一使用浏览器 UA：部分片源站 WAF 会拒绝
+/// `NEWTV/0.1` 这类非浏览器标识，表现为连接被重置。
+const _playbackUserAgent =
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
+    '(KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36';
 
 class PlayerController extends ChangeNotifier {
   PlayerController({
     required ServerConfig server,
     required AppSettings settings,
+    Dio? dio,
     this.onCompleted,
   })  : _server = server,
         _settings = settings,
+        _dio = dio,
         player = Player(
           configuration: PlayerConfiguration(
             logLevel: kDebugMode ? MPVLogLevel.info : MPVLogLevel.error,
           ),
         ) {
     videoController = VideoController(player);
+    // libmpv 走自己的 TLS 栈，dio 的「允许自签名证书」对它不生效。
+    if (server.allowSelfSigned) {
+      final platform = player.platform;
+      if (platform is NativePlayer) {
+        unawaited(platform.setProperty('tls-verify', 'no'));
+      }
+    }
     if (kDebugMode) {
       _subscriptions.add(
         player.stream.log.listen(
@@ -83,7 +101,7 @@ class PlayerController extends ChangeNotifier {
           return;
         }
         _error = value.isEmpty ? '播放失败，请尝试切换片源' : '播放失败';
-        _errorDetail = value;
+        _errorDetail = _serverError ?? value;
         notifyListeners();
       }),
     ]);
@@ -91,6 +109,7 @@ class PlayerController extends ChangeNotifier {
 
   final ServerConfig _server;
   final AppSettings _settings;
+  final Dio? _dio;
   final VoidCallback? onCompleted;
   final Player player;
   late final VideoController videoController;
@@ -103,6 +122,7 @@ class PlayerController extends ChangeNotifier {
   double _rate = 1.0;
   String? _errorDetail;
   String? _rawUrl;
+  String? _serverError;
   List<String> _candidates = const [];
   var _candidateIndex = 0;
   var _playing = false;
@@ -141,6 +161,7 @@ class PlayerController extends ChangeNotifier {
     }
     final index = context.episodeIndex.clamp(0, episodes.length - 1);
     _rawUrl = episodes[index];
+    _serverError = null;
     final proxyUrl = MediaApi.buildProxyUrl(
       baseUrl: _server.baseUrl,
       rawUrl: _rawUrl!,
@@ -149,12 +170,82 @@ class PlayerController extends ChangeNotifier {
       adblock: _settings.adblock,
       proxySegments: _settings.proxySegments,
     );
-    // m3u8 走服务端代理可避开源站的 Brotli 压缩兼容问题（libmpv 无法解压），
-    // 分片仍直连以保证速度；代理不可用时自动回退直连。
-    _candidates = [proxyUrl, _rawUrl!];
+    // 全量代理分片模式：本机到源站 CDN 不通时，只能全部走用户自己的服务器。
+    final proxyAllUrl = MediaApi.buildProxyUrl(
+      baseUrl: _server.baseUrl,
+      rawUrl: _rawUrl!,
+      source: context.item.source,
+      playbackToken: _settings.playbackToken,
+      adblock: _settings.adblock,
+      proxySegments: true,
+    );
+
+    // 依次尝试：服务端取 m3u8（避开 Brotli 压缩）→ 直连源站 → 全量代理分片。
+    final candidates = <String>[proxyUrl, _rawUrl!];
+    if (proxyAllUrl != proxyUrl) candidates.add(proxyAllUrl);
+    _candidates = candidates;
     _candidateIndex = 0;
-    if (kDebugMode) debugPrint('NEWTV play url: ${_candidates.first}');
-    await _openUrl(_candidates.first);
+
+    // 先预检代理链路：服务端取流失败时会返回具体 error，
+    // 提前跳过可以省掉一次 mpv 失败等待，也能把真实原因显示给用户。
+    if (_dio != null) {
+      final reason = await _probeProxy(proxyUrl);
+      if (reason != null) {
+        _serverError = reason;
+        if (_candidates.length > 1) _candidateIndex = 1;
+        if (kDebugMode) debugPrint('NEWTV proxy probe failed: $reason');
+      }
+    }
+
+    if (kDebugMode) debugPrint('NEWTV play url: ${_candidates[_candidateIndex]}');
+    await _openUrl(_candidates[_candidateIndex]);
+  }
+
+  /// 打开前用 dio 取回播放列表开头，判断服务端是否成功取流。
+  /// 返回 null 表示可用，否则返回可读的失败原因。
+  Future<String?> _probeProxy(String url) async {
+    try {
+      final response = await _dio!.get<List<int>>(
+        url,
+        options: Options(
+          responseType: ResponseType.bytes,
+          headers: {'Range': 'bytes=0-1023'},
+          validateStatus: (_) => true,
+          receiveTimeout: const Duration(seconds: 10),
+        ),
+      );
+      final status = response.statusCode ?? 0;
+      if (status < 200 || status >= 300) {
+        return '服务端取流失败（HTTP $status）';
+      }
+      final contentType =
+          (response.headers.value(Headers.contentTypeHeader) ?? '').toLowerCase();
+      final bytes = response.data ?? const <int>[];
+      if (contentType.contains('json')) {
+        final text = utf8.decode(bytes, allowMalformed: true);
+        return _extractServerError(text) ?? '服务端无法获取该播放地址';
+      }
+      final head = String.fromCharCodes(bytes.take(16));
+      if (bytes.isNotEmpty && !head.contains('#EXT')) {
+        return '服务端返回的内容不是播放列表（可能被源站拦截）';
+      }
+      return null;
+    } on Object catch (error) {
+      return readableError(error);
+    }
+  }
+
+  static String? _extractServerError(String text) {
+    try {
+      final data = jsonDecode(text);
+      if (data is Map && data['error'] is String) {
+        final value = (data['error'] as String).trim();
+        return value.isEmpty ? null : value;
+      }
+    } on Object {
+      // 非 JSON 响应，交给调用方兜底。
+    }
+    return null;
   }
 
   Future<void> _openUrl(String url) async {
@@ -162,8 +253,8 @@ class PlayerController extends ChangeNotifier {
       await player.open(
         Media(
           url,
-          httpHeaders: {
-            'User-Agent': _server.userAgent,
+          httpHeaders: const {
+            'User-Agent': _playbackUserAgent,
             // 部分片源站默认返回 Brotli 压缩流，libmpv 无法解压会直接报
             // "Failed to recognize file format"，因此要求不压缩的原始内容。
             'Accept-Encoding': 'identity',

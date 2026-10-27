@@ -1,8 +1,7 @@
-import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
 
 import '../../domain/models/media_item.dart';
-import 'skeleton_box.dart';
+import 'smart_image.dart';
 
 class PosterCard extends StatefulWidget {
   const PosterCard({
@@ -87,15 +86,7 @@ class _PosterCardState extends State<PosterCard> {
                           if (widget.item.poster.isEmpty)
                             Container(color: scheme.surfaceContainerHighest)
                           else
-                            CachedNetworkImage(
-                              imageUrl: widget.item.poster,
-                              fit: BoxFit.cover,
-                              placeholder: (context, url) => SkeletonBox(),
-                              errorWidget: (context, url, error) => Container(
-                                color: scheme.surfaceContainerHighest,
-                                child: const Icon(Icons.broken_image_outlined),
-                              ),
-                            ),
+                            SmartImage(url: widget.item.poster),
                           AnimatedOpacity(
                             opacity: _hovered ? 1 : 0,
                             duration: const Duration(milliseconds: 140),

@@ -10,6 +10,7 @@ import '../../core/auth/session_manager.dart';
 import '../../core/config/app_settings.dart';
 import '../../core/config/server_config.dart';
 import '../../core/network/dio_client.dart';
+import '../../core/utils/image_url.dart';
 import 'api/auth_api.dart';
 import 'api/media_api.dart';
 import 'repositories/media_repository.dart';
@@ -49,7 +50,14 @@ class AppDependencies {
     final server = await serverStore.load();
     var hasCookies = false;
     if (server != null) {
-      hasCookies = (await cookieJar.loadForRequest(Uri.parse(server.baseUrl))).isNotEmpty;
+      final cookies = await cookieJar.loadForRequest(Uri.parse(server.baseUrl));
+      hasCookies = cookies.isNotEmpty;
+      // 冷启动时已经登录的情况，海报同样需要带上 Cookie 才能走图片代理。
+      ImageAuth.update(
+        baseUrl: server.baseUrl,
+        cookieHeader:
+            cookies.map((cookie) => '${cookie.name}=${cookie.value}').join('; '),
+      );
     }
     late SessionManager session;
     final dioClient = DioClient(

@@ -1,13 +1,14 @@
 import 'dart:ui';
 
-import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import '../../core/network/api_exception.dart';
+import '../../core/utils/media_grouping.dart';
 import '../../domain/models/media_item.dart';
 import '../../providers.dart';
+import '../../shared/widgets/smart_image.dart';
 
 class DetailPage extends ConsumerStatefulWidget {
   const DetailPage({required this.initialItem, this.availableSources = const [], super.key});
@@ -22,20 +23,88 @@ class DetailPage extends ConsumerStatefulWidget {
 class _DetailPageState extends ConsumerState<DetailPage> {
   late MediaItem _selectedSource;
   late MediaItem _item;
+  late List<MediaItem> _sources;
   var _loading = true;
   String? _error;
   var _selectedEpisode = 0;
   var _favorited = false;
   var _favoriteBusy = false;
+  var _resolvingSources = false;
 
   @override
   void initState() {
     super.initState();
     _selectedSource = widget.initialItem;
     _item = widget.initialItem;
+    _sources = List<MediaItem>.of(widget.availableSources);
+    if (_sources.isEmpty && widget.initialItem.source.isNotEmpty) {
+      _sources = [widget.initialItem];
+    }
     _selectedEpisode = widget.initialItem.lastEpisodeIndex;
-    _load();
-    _checkFavorite();
+    if (_sources.isEmpty) {
+      // 豆瓣 / TMDB / 番剧表条目没有片源代码，先按标题聚合搜索接源。
+      _resolveSources();
+    } else {
+      _load();
+      _checkFavorite();
+    }
+  }
+
+  /// 用标题调 `/api/search`，把豆瓣/TMDB 条目换成真实片源组。
+  Future<void> _resolveSources() async {
+    if (_resolvingSources) return;
+    _resolvingSources = true;
+    setState(() {
+      _loading = true;
+      _error = null;
+    });
+    final target = widget.initialItem;
+    try {
+      final results = await ref
+          .read(appDependenciesProvider)
+          .mediaRepository
+          .search(target.title);
+      if (!mounted) return;
+      final group = pickBestGroup(target, results);
+      if (group == null || group.isEmpty) {
+        setState(() {
+          _loading = false;
+          _error = '未在任何片源找到该片，可换个关键词手动搜索';
+        });
+        return;
+      }
+      // 用豆瓣/TMDB 的元数据补齐片源条目缺失的海报、简介、年份与评分。
+      final primary = _mergeMetadata(group.first, target);
+      if (!mounted) return;
+      setState(() {
+        _sources = [primary, ...group.skip(1)];
+        _selectedSource = primary;
+        _item = primary;
+        _selectedEpisode = primary.lastEpisodeIndex;
+      });
+      await _load();
+      await _checkFavorite();
+    } catch (error) {
+      if (!mounted) return;
+      setState(() {
+        _loading = false;
+        _error = readableError(error);
+      });
+    } finally {
+      _resolvingSources = false;
+    }
+  }
+
+  static MediaItem _mergeMetadata(MediaItem source, MediaItem meta) {
+    return source.copyWith(
+      title: source.title.trim().isEmpty ? meta.title : source.title,
+      poster: source.poster.trim().isEmpty ? meta.poster : source.poster,
+      description:
+          source.description.trim().isEmpty ? meta.description : source.description,
+      year: source.year.trim().isEmpty ? meta.year : source.year,
+      rate: source.rate.trim().isEmpty ? meta.rate : source.rate,
+      doubanId: source.doubanId.isEmpty ? meta.doubanId : source.doubanId,
+    );
   }
 
   Future<void> _checkFavorite() async {
@@ -73,7 +142,10 @@ class _DetailPageState extends ConsumerState<DetailPage> {
     }
   }
 
-  Future<void> _load({bool force = false}) async {
+  /// 详情接口返回 0 集的源（部分源站已失效），自动切到同组下一个源。
+  final _emptySources = <String>{};
+
+  Future<void> _load({bool force = false, bool autoFallback = true}) async {
     final source = _selectedSource;
     setState(() {
       _loading = true;
@@ -94,6 +166,22 @@ class _DetailPageState extends ConsumerState<DetailPage> {
           _selectedEpisode = 0;
         }
       });
+      if (loaded.episodes.isEmpty) {
+        _emptySources.add(source.storageKey);
+        if (autoFallback) {
+          final alternative = _nextUsableSource();
+          if (alternative != null) {
+            setState(() {
+              _selectedSource = alternative;
+              _item = alternative;
+              _selectedEpisode = alternative.lastEpisodeIndex;
+            });
+            return await _load(force: force, autoFallback: true);
+          }
+        }
+      } else {
+        _emptySources.remove(source.storageKey);
+      }
     } catch (error) {
       if (!mounted || !identical(source, _selectedSource)) return;
       setState(() {
@@ -103,14 +191,26 @@ class _DetailPageState extends ConsumerState<DetailPage> {
     }
   }
 
+  /// 找一个还没试过、且已知有集数的源。
+  MediaItem? _nextUsableSource() {
+    for (final candidate in _sources) {
+      if (_emptySources.contains(candidate.storageKey)) continue;
+      if (candidate.storageKey == _selectedSource.storageKey) continue;
+      return candidate;
+    }
+    return null;
+  }
+
   void _changeSource(MediaItem source) {
-    if (identical(source.source, _selectedSource.source)) return;
+    if (source.source == _selectedSource.source && source.id == _selectedSource.id) {
+      return;
+    }
     setState(() {
       _selectedSource = source;
       _item = source;
       _selectedEpisode = source.lastEpisodeIndex;
     });
-    _load();
+    _load(autoFallback: false);
     _checkFavorite();
   }
 
@@ -122,7 +222,7 @@ class _DetailPageState extends ConsumerState<DetailPage> {
       extra: PlaybackContext(
         item: item,
         episodeIndex: _selectedEpisode.clamp(0, item.episodes.length - 1),
-        availableSources: widget.availableSources,
+        availableSources: _sources,
         initialPositionSeconds: _selectedEpisode == item.lastEpisodeIndex
             ? item.playTimeSeconds
             : 0,
@@ -186,14 +286,18 @@ class _DetailPageState extends ConsumerState<DetailPage> {
                           const SizedBox(width: 8),
                           Expanded(
                             child: Text(
-                              '详情补全失败，当前显示搜索结果：$_error',
+                              _sources.isEmpty
+                                  ? _error!
+                                  : '详情补全失败，当前显示搜索结果：$_error',
                               maxLines: 2,
                               overflow: TextOverflow.ellipsis,
                               style: Theme.of(context).textTheme.bodySmall,
                             ),
                           ),
                           TextButton(
-                            onPressed: () => _load(force: true),
+                            onPressed: _sources.isEmpty
+                                ? _resolveSources
+                                : () => _load(force: true),
                             child: const Text('重试'),
                           ),
                         ],
@@ -201,11 +305,11 @@ class _DetailPageState extends ConsumerState<DetailPage> {
                     ),
                     const SizedBox(height: 12),
                   ],
-                  if (widget.availableSources.length > 1) ...[
+                  if (_sources.length > 1) ...[
                     Text('播放源', style: Theme.of(context).textTheme.titleMedium),
                     const SizedBox(height: 10),
                     _SourceChips(
-                      sources: widget.availableSources,
+                      sources: _sources,
                       selected: _selectedSource,
                       onSelected: _changeSource,
                     ),
@@ -243,7 +347,11 @@ class _DetailPageState extends ConsumerState<DetailPage> {
                     Padding(
                       padding: const EdgeInsets.symmetric(vertical: 12),
                       child: Text(
-                        _loading ? '正在获取选集…' : '该片源没有可用选集，试试切换其他播放源',
+                        _loading
+                            ? '正在获取选集…'
+                            : _sources.isEmpty
+                                ? '未找到可用片源，可返回搜索该片'
+                                : '该片源没有可用选集，试试切换其他播放源',
                         style: Theme.of(context).textTheme.bodyMedium,
                       ),
                     )
@@ -332,11 +440,9 @@ class _Header extends StatelessWidget {
         fit: StackFit.expand,
         children: [
           if (item.poster.isNotEmpty)
-            CachedNetworkImage(
-              imageUrl: item.poster,
-              fit: BoxFit.cover,
-              fadeInDuration: Duration.zero,
-              errorWidget: (context, url, error) => const ColoredBox(color: Colors.black26),
+            SmartImage(
+              url: item.poster,
+              errorBuilder: (context) => const ColoredBox(color: Colors.black26),
             ),
           // 模糊背景由 RepaintBoundary 包住，避免滚动时反复重绘导致闪烁。
           RepaintBoundary(
@@ -394,10 +500,10 @@ class _Header extends StatelessWidget {
                             borderRadius: BorderRadius.circular(12),
                             child: item.poster.isEmpty
                                 ? const ColoredBox(color: Colors.white24)
-                                : CachedNetworkImage(
-                                    imageUrl: item.poster,
-                                    fit: BoxFit.cover,
-                                    fadeInDuration: Duration.zero,
+                                : SmartImage(
+                                    url: item.poster,
+                                    errorBuilder: (context) =>
+                                        const ColoredBox(color: Colors.white24),
                                   ),
                           ),
                         ),
