@@ -705,10 +705,13 @@ class _SourceSearchSheetState extends ConsumerState<_SourceSearchSheet> {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    final insets = MediaQuery.viewInsetsOf(context).bottom;
+    // 键盘弹起后剩余高度再取 72%，避免「固定高度 + 底部 inset」把内容挤出屏幕。
+    final available = MediaQuery.sizeOf(context).height - insets;
     return Padding(
-      padding: EdgeInsets.only(bottom: MediaQuery.viewInsetsOf(context).bottom),
+      padding: EdgeInsets.only(bottom: insets),
       child: SizedBox(
-        height: MediaQuery.sizeOf(context).height * 0.72,
+        height: available * 0.72,
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
