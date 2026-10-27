@@ -76,6 +76,9 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
   /// 再查一次播放记录，命中同集且 >10s 时给一个可点击的提示。
   Future<void> _checkResumeHint() async {
     if (_currentPlayback.initialPositionSeconds > 0) return;
+    if (_currentPlayback.item.source.isEmpty || _currentPlayback.item.id.isEmpty) {
+      return;
+    }
     try {
       final record = await ref
           .read(appDependenciesProvider)
@@ -94,7 +97,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
       if (_player.position.inSeconds > 10) return;
       setState(() => _resumeHint = record.playTimeSeconds);
       _resumeHintTimer?.cancel();
-      _resumeHintTimer = Timer(const Duration(seconds: 15), () {
+      _resumeHintTimer = Timer(const Duration(seconds: 5), () {
         if (mounted) setState(() => _resumeHint = null);
       });
     } on Object {
@@ -130,15 +133,20 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
     if (nextIndex < 0 || nextIndex >= _currentPlayback.item.episodes.length) return;
     await _syncPlayProgress();
     _danmaku.clear();
+    _resumeHintTimer?.cancel();
     final nextContext = PlaybackContext(
       item: _currentPlayback.item,
       episodeIndex: nextIndex,
       availableSources: _currentPlayback.availableSources,
     );
     if (!mounted) return;
-    setState(() => _currentPlayback = nextContext);
+    setState(() {
+      _currentPlayback = nextContext;
+      _resumeHint = null;
+    });
     unawaited(_player.open(nextContext));
     unawaited(_danmaku.loadFor(nextContext));
+    unawaited(_checkResumeHint());
   }
 
   /// 换源：保留当前集号（对齐到新源的同一集），不必退回详情页。
@@ -221,9 +229,14 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
       availableSources: _currentPlayback.availableSources,
     );
     _danmaku.clear();
-    setState(() => _currentPlayback = next);
+    _resumeHintTimer?.cancel();
+    setState(() {
+      _currentPlayback = next;
+      _resumeHint = null;
+    });
     unawaited(_player.open(next));
     unawaited(_danmaku.loadFor(next));
+    unawaited(_checkResumeHint());
   }
 
   void _enterImmersiveMode() {
@@ -250,7 +263,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
     if (!mounted) return;
     // go_router 下必须用 router 的 pop，Navigator.maybePop 会静默失败导致卡在播放页。
     if (context.canPop()) {
-      context.pop();
+      context.pop(_currentPlayback.item);
     } else {
       context.go('/home');
     }
@@ -454,9 +467,9 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
   }
 }
 
-/// 「上次播放到 XX:XX，点击跳转」提示条。
+/// 「从上次位置继续？（XX:XX）」提示条。
 ///
-/// 与网页版行为一致：只在用户点击时跳转，不强行打断从头播放。
+/// 对齐网页版 MoonTVPlus 的 play-record-jump 交互：支持点击继续或「从头播」，5 秒无操作自动收起。
 class _ResumeHint extends StatelessWidget {
   const _ResumeHint({
     required this.seconds,
@@ -471,33 +484,42 @@ class _ResumeHint extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Material(
-      color: Colors.black.withValues(alpha: 0.62),
+      color: Colors.black.withValues(alpha: 0.72),
       borderRadius: BorderRadius.circular(999),
-      child: InkWell(
-        borderRadius: BorderRadius.circular(999),
-        onTap: onTap,
-        child: Padding(
-          padding: const EdgeInsets.fromLTRB(12, 6, 6, 6),
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              const Icon(Icons.history, size: 16, color: Colors.white70),
-              const SizedBox(width: 6),
-              Text(
-                '上次播放到 ${_clockLabel(seconds)}，点击跳转',
-                style: const TextStyle(color: Colors.white, fontSize: 12),
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(12, 4, 8, 4),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Icon(Icons.history, size: 16, color: Colors.white70),
+            const SizedBox(width: 6),
+            Text(
+              '从上次位置继续？（${_clockLabel(seconds)}）',
+              style: const TextStyle(color: Colors.white, fontSize: 12),
+            ),
+            const SizedBox(width: 6),
+            TextButton(
+              style: TextButton.styleFrom(
+                visualDensity: VisualDensity.compact,
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                minimumSize: Size.zero,
+                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
               ),
-              const SizedBox(width: 4),
-              InkResponse(
-                onTap: onDismiss,
-                radius: 16,
-                child: const Padding(
-                  padding: EdgeInsets.all(4),
-                  child: Icon(Icons.close, size: 14, color: Colors.white54),
-                ),
+              onPressed: onTap,
+              child: const Text('继续', style: TextStyle(fontSize: 12)),
+            ),
+            TextButton(
+              style: TextButton.styleFrom(
+                visualDensity: VisualDensity.compact,
+                foregroundColor: Colors.white70,
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                minimumSize: Size.zero,
+                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
               ),
-            ],
-          ),
+              onPressed: onDismiss,
+              child: const Text('从头播', style: TextStyle(fontSize: 12)),
+            ),
+          ],
         ),
       ),
     );
@@ -647,25 +669,6 @@ class _ControlsOverlay extends StatelessWidget {
                   ),
                 ),
               ),
-            // 进度条与控制栏一同淡出：收起时不再贴在底部常驻。
-            Positioned(
-              left: 24,
-              right: 24,
-              bottom: 76,
-              child: IgnorePointer(
-                ignoring: !visible,
-                child: AnimatedOpacity(
-                  opacity: visible ? 1 : 0,
-                  duration: const Duration(milliseconds: 180),
-                  child: _ProgressBar(
-                    position: position,
-                    duration: duration,
-                    onChanged: onSeek,
-                    onInteract: onInteract,
-                  ),
-                ),
-              ),
-            ),
             Positioned.fill(
               child: IgnorePointer(
                 ignoring: !visible,
@@ -791,6 +794,25 @@ class _ControlsOverlay extends StatelessWidget {
                 ),
               ),
             ),
+            // 进度条必须置于渐变遮罩层（DecoratedBox）之上，否则全屏 DecoratedBox 会拦截拖拽手势。
+            Positioned(
+              left: 24,
+              right: 24,
+              bottom: 72,
+              child: IgnorePointer(
+                ignoring: !visible,
+                child: AnimatedOpacity(
+                  opacity: visible ? 1 : 0,
+                  duration: const Duration(milliseconds: 180),
+                  child: PlayerProgressBar(
+                    position: position,
+                    duration: duration,
+                    onSeek: onSeek,
+                    onInteract: onInteract,
+                  ),
+                ),
+              ),
+            ),
           ],
         );
       },
@@ -902,39 +924,148 @@ class _QualityRow extends StatelessWidget {
   }
 }
 
-class _ProgressBar extends StatelessWidget {
-  const _ProgressBar({
+/// 播放器进度条：维护本地拖拽态与 seek 收敛窗口。
+///
+/// - 拖动期间仅更新本地预览值并展示 `mm:ss / mm:ss` 气泡，忽略实时位置流推送、不触发底层 seek；
+/// - 松手（`onChangeEnd`）时只发一次真实 seek；
+/// - seek 发出后保持落点位置，待位置流跳到落点（误差 < 1s）或超时后再交回控制权，避免拇指闪回原处。
+class PlayerProgressBar extends StatefulWidget {
+  const PlayerProgressBar({
     required this.position,
     required this.duration,
-    required this.onChanged,
+    required this.onSeek,
     required this.onInteract,
+    super.key,
   });
 
   final Duration position;
   final Duration duration;
-  final ValueChanged<Duration> onChanged;
+  final ValueChanged<Duration> onSeek;
   final VoidCallback onInteract;
 
   @override
+  State<PlayerProgressBar> createState() => _PlayerProgressBarState();
+}
+
+class _PlayerProgressBarState extends State<PlayerProgressBar> {
+  static const _convergenceThresholdMs = 1000;
+  static const _convergenceHoldDuration = Duration(milliseconds: 1500);
+
+  var _dragging = false;
+  var _dragMs = 0.0;
+  double? _pendingSeekMs;
+  Timer? _convergenceTimer;
+
+  @override
+  void didUpdateWidget(covariant PlayerProgressBar oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (widget.duration != oldWidget.duration &&
+        widget.duration <= Duration.zero) {
+      _convergenceTimer?.cancel();
+      _dragging = false;
+      _pendingSeekMs = null;
+      return;
+    }
+    if (!_dragging && _pendingSeekMs != null) {
+      final diff =
+          (widget.position.inMilliseconds - _pendingSeekMs!).abs();
+      if (diff <= _convergenceThresholdMs) {
+        _convergenceTimer?.cancel();
+        _pendingSeekMs = null;
+      }
+    }
+  }
+
+  @override
+  void dispose() {
+    _convergenceTimer?.cancel();
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) {
-    final total = duration.inMilliseconds;
-    final current = position.inMilliseconds.clamp(0, total <= 0 ? 1 : total);
-    return SliderTheme(
-      data: SliderTheme.of(context).copyWith(
-        trackHeight: 3,
-        thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 6),
-        overlayShape: const RoundSliderOverlayShape(overlayRadius: 14),
-      ),
-      child: Slider(
-        min: 0,
-        max: total <= 0 ? 1 : total.toDouble(),
-        value: current.toDouble(),
-        onChangeStart: (_) => onInteract(),
-        onChanged: (value) {
-          onInteract();
-          onChanged(Duration(milliseconds: value.round()));
-        },
-      ),
+    final totalMs = widget.duration.inMilliseconds;
+    final maxMs = totalMs <= 0 ? 1.0 : totalMs.toDouble();
+    final rawMs = _dragging
+        ? _dragMs
+        : (_pendingSeekMs ?? widget.position.inMilliseconds.toDouble());
+    final currentMs = rawMs.clamp(0.0, maxMs);
+    final previewSec = (currentMs / 1000).round();
+    final totalSec = totalMs <= 0 ? 0 : (totalMs / 1000).round();
+
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        if (_dragging)
+          Container(
+            margin: const EdgeInsets.only(bottom: 6),
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 5),
+            decoration: BoxDecoration(
+              color: Colors.black.withValues(alpha: 0.78),
+              borderRadius: BorderRadius.circular(999),
+              border: Border.all(color: Colors.white24, width: 0.5),
+            ),
+            child: Text(
+              '${_clockLabel(previewSec)} / ${_clockLabel(totalSec)}',
+              style: const TextStyle(
+                color: Colors.white,
+                fontSize: 12,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ),
+        SliderTheme(
+          data: SliderTheme.of(context).copyWith(
+            trackHeight: _dragging ? 4 : 3,
+            thumbShape: RoundSliderThumbShape(
+              enabledThumbRadius: _dragging ? 8 : 6,
+            ),
+            overlayShape: const RoundSliderOverlayShape(overlayRadius: 16),
+          ),
+          child: Slider(
+            min: 0,
+            max: maxMs,
+            value: currentMs,
+            onChangeStart: totalMs <= 0
+                ? null
+                : (value) {
+                    widget.onInteract();
+                    _convergenceTimer?.cancel();
+                    setState(() {
+                      _dragging = true;
+                      _dragMs = value;
+                      _pendingSeekMs = null;
+                    });
+                  },
+            onChanged: totalMs <= 0
+                ? null
+                : (value) {
+                    widget.onInteract();
+                    setState(() {
+                      _dragging = true;
+                      _dragMs = value;
+                    });
+                  },
+            onChangeEnd: totalMs <= 0
+                ? null
+                : (value) {
+                    widget.onInteract();
+                    final targetMs = value.round().clamp(0, totalMs);
+                    _convergenceTimer?.cancel();
+                    setState(() {
+                      _dragging = false;
+                      _pendingSeekMs = targetMs.toDouble();
+                    });
+                    _convergenceTimer = Timer(_convergenceHoldDuration, () {
+                      if (mounted && _pendingSeekMs != null) {
+                        setState(() => _pendingSeekMs = null);
+                      }
+                    });
+                    widget.onSeek(Duration(milliseconds: targetMs));
+                  },
+          ),
+        ),
+      ],
     );
   }
 }

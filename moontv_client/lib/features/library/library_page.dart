@@ -100,7 +100,13 @@ class _MediaListState extends State<_MediaList> {
               final item = items[index];
               return Stack(
                 children: [
-                  PosterCard(item: item, onTap: () => context.push('/detail', extra: [item])),
+                  PosterCard(
+                    item: item,
+                    onTap: () async {
+                      await context.push('/detail', extra: [item]);
+                      if (mounted) _reload();
+                    },
+                  ),
                   if (item.source.isNotEmpty && item.id.isNotEmpty)
                     Positioned(
                       top: 6,

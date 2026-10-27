@@ -116,18 +116,23 @@ class _MediaRail extends StatelessWidget {
         width: cardWidth,
         hasSubtitle: hasSubtitle,
       ),
-      child: ListView.separated(
-        scrollDirection: Axis.horizontal,
-        itemCount: items.length,
-        separatorBuilder: (context, index) => const SizedBox(width: 14),
-        itemBuilder: (context, index) {
-          final item = items[index];
-          return PosterCard(
-            item: item,
-            width: cardWidth,
-            onTap: () => context.push('/detail', extra: [item]),
-          );
-        },
+      child: Consumer(
+        builder: (context, ref, _) => ListView.separated(
+          scrollDirection: Axis.horizontal,
+          itemCount: items.length,
+          separatorBuilder: (context, index) => const SizedBox(width: 14),
+          itemBuilder: (context, index) {
+            final item = items[index];
+            return PosterCard(
+              item: item,
+              width: cardWidth,
+              onTap: () async {
+                await context.push('/detail', extra: [item]);
+                if (context.mounted) ref.invalidate(homeDataProvider);
+              },
+            );
+          },
+        ),
       ),
     );
   }

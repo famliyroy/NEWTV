@@ -46,7 +46,9 @@ class MediaRepository {
       totalTimeSeconds: item.totalTimeSeconds,
       saveTime: item.saveTime,
     );
-    _details[key] = _TimedDetail(merged);
+    if (merged.episodes.isNotEmpty) {
+      _details[key] = _TimedDetail(merged);
+    }
     return merged;
   }
 
@@ -156,15 +158,9 @@ class MediaRepository {
     required int playTimeSeconds,
     required int totalTimeSeconds,
   }) async {
-    await _api.savePlayRecord(
-      item,
-      episodeIndex: episodeIndex,
-      playTimeSeconds: playTimeSeconds,
-      totalTimeSeconds: totalTimeSeconds,
-    );
-    // 同步本地索引：刚播完就回详情页时能立刻看到新进度，不必等 5 分钟 TTL。
-    final map = _playRecords;
-    if (map != null && item.source.isNotEmpty && item.id.isNotEmpty) {
+    // 先同步本地索引：刚播完就回详情页时能立刻看到新进度，不必等 5 分钟 TTL。
+    if (item.source.isNotEmpty && item.id.isNotEmpty) {
+      final map = _playRecords ??= <String, MediaItem>{};
       map[item.storageKey] = item.copyWith(
         lastEpisodeIndex: episodeIndex,
         playTimeSeconds: playTimeSeconds,
@@ -172,6 +168,12 @@ class MediaRepository {
         saveTime: DateTime.now().millisecondsSinceEpoch,
       );
     }
+    await _api.savePlayRecord(
+      item,
+      episodeIndex: episodeIndex,
+      playTimeSeconds: playTimeSeconds,
+      totalTimeSeconds: totalTimeSeconds,
+    );
   }
 
   Future<void> deletePlayRecord(MediaItem item) async {

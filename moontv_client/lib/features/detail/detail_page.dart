@@ -36,6 +36,12 @@ class _DetailPageState extends ConsumerState<DetailPage> {
   /// 用户是否手动点过选集：点过就不再用播放记录覆盖选集位置。
   var _episodePickedByUser = false;
 
+  /// 已尝试过自动按标题接源：每次进入详情页最多自动触发一轮，防止死循环。
+  var _autoSearchResolved = false;
+
+  /// 详情接口报错或返回 0 集的源。
+  final _detailFailedSources = <String>{};
+
   @override
   void initState() {
     super.initState();
@@ -59,6 +65,7 @@ class _DetailPageState extends ConsumerState<DetailPage> {
   Future<void> _resolveSources() async {
     if (_resolvingSources) return;
     _resolvingSources = true;
+    _autoSearchResolved = true;
     setState(() {
       _loading = true;
       _error = null;
@@ -82,7 +89,10 @@ class _DetailPageState extends ConsumerState<DetailPage> {
       final primary = _mergeMetadata(group.first, target);
       if (!mounted) return;
       setState(() {
-        _sources = [primary, ...group.skip(1)];
+        _sources = [
+          primary,
+          for (final item in group.skip(1)) _mergeMetadata(item, target),
+        ];
         _selectedSource = primary;
         _item = primary;
         _selectedEpisode = primary.lastEpisodeIndex;
@@ -152,6 +162,23 @@ class _DetailPageState extends ConsumerState<DetailPage> {
 
   Future<void> _load({bool force = false, bool autoFallback = true}) async {
     final source = _selectedSource;
+    // 若该源此前 /api/detail 已失败，但自动接源/搜索结果已补齐选集，
+    // 直接使用搜索选集并恢复播放记录，避免再次触发 detail 404。
+    if (!force &&
+        _detailFailedSources.contains(source.storageKey) &&
+        source.episodes.isNotEmpty) {
+      setState(() {
+        _item = source;
+        _loading = false;
+        _error = null;
+        _emptySources.remove(source.storageKey);
+        _selectedEpisode =
+            _selectedEpisode.clamp(0, source.episodes.length - 1);
+      });
+      await _applyPlayRecord();
+      return;
+    }
+
     setState(() {
       _loading = true;
       _error = null;
@@ -162,39 +189,155 @@ class _DetailPageState extends ConsumerState<DetailPage> {
           .mediaRepository
           .detail(source, force: force);
       if (!mounted || !identical(source, _selectedSource)) return;
-      setState(() {
-        _item = loaded;
-        _loading = false;
-        if (loaded.episodes.isNotEmpty) {
-          _selectedEpisode = _selectedEpisode.clamp(0, loaded.episodes.length - 1);
-        } else {
-          _selectedEpisode = 0;
-        }
-      });
       if (loaded.episodes.isEmpty) {
+        _detailFailedSources.add(source.storageKey);
         _emptySources.add(source.storageKey);
-        if (autoFallback) {
-          final alternative = _nextUsableSource();
-          if (alternative != null) {
-            setState(() {
-              _selectedSource = alternative;
-              _item = alternative;
-              _selectedEpisode = alternative.lastEpisodeIndex;
-            });
-            return await _load(force: force, autoFallback: true);
-          }
+        if (autoFallback && await _tryAutoFallback(force: force)) {
+          return;
         }
-      } else {
-        _emptySources.remove(source.storageKey);
-        // 详情拿到集数后补全「上次看到哪一集、哪一秒」。
-        await _applyPlayRecord();
+        setState(() {
+          _item = loaded;
+          _loading = false;
+          _selectedEpisode = 0;
+        });
+        return;
       }
+      _emptySources.remove(source.storageKey);
+      setState(() {
+        _selectedSource = loaded;
+        _item = loaded;
+        _sources = [
+          for (final entry in _sources)
+            entry.storageKey == loaded.storageKey ? loaded : entry,
+        ];
+        _loading = false;
+        _selectedEpisode =
+            _selectedEpisode.clamp(0, loaded.episodes.length - 1);
+      });
+      // 详情拿到集数后补全「上次看到哪一集、哪一秒」。
+      await _applyPlayRecord();
     } catch (error) {
+      if (!mounted || !identical(source, _selectedSource)) return;
+      _detailFailedSources.add(source.storageKey);
+      // 当前源已自带搜索选集（如特殊源 detail 404 但 search 有选集）：
+      // 保留选集可正常播放，并补全播放记录。
+      if (source.episodes.isNotEmpty) {
+        _emptySources.remove(source.storageKey);
+        setState(() {
+          _item = source;
+          _loading = false;
+          _error = readableError(error);
+          _selectedEpisode =
+              _selectedEpisode.clamp(0, source.episodes.length - 1);
+        });
+        await _applyPlayRecord();
+        return;
+      }
+      // 当前源无选集（典型：从历史/收藏进入，且详情接口 404）：
+      // 自动走降级链（先切同组其它源，无可用源则按标题自动搜索接源）。
+      _emptySources.add(source.storageKey);
+      if (autoFallback && await _tryAutoFallback(force: force)) {
+        return;
+      }
       if (!mounted || !identical(source, _selectedSource)) return;
       setState(() {
         _loading = false;
         _error = readableError(error);
       });
+    }
+  }
+
+  /// 自动降级链：先在 `_sources` 内找其它可用源；若无可用源则按标题自动搜索接源（仅一轮）。
+  Future<bool> _tryAutoFallback({required bool force}) async {
+    final alternative = _nextUsableSource();
+    if (alternative != null) {
+      setState(() {
+        _selectedSource = alternative;
+        _item = alternative;
+        if (!_episodePickedByUser) {
+          _selectedEpisode = alternative.lastEpisodeIndex;
+        }
+      });
+      await _load(force: force, autoFallback: true);
+      await _checkFavorite();
+      return true;
+    }
+    if (_autoSearchResolved) return false;
+    _autoSearchResolved = true;
+    return _autoResolveFromSearch(force: force);
+  }
+
+  /// 单源（历史/收藏）或同组源全部失效时，自动按标题调 `/api/search` 接源。
+  Future<bool> _autoResolveFromSearch({required bool force}) async {
+    if (_resolvingSources) return false;
+    final target = _item.title.trim().isNotEmpty ? _item : widget.initialItem;
+    if (target.title.trim().isEmpty) return false;
+    _resolvingSources = true;
+    try {
+      final results = await ref
+          .read(appDependenciesProvider)
+          .mediaRepository
+          .search(target.title);
+      if (!mounted) return true;
+      final group = pickBestGroup(target, results);
+      if (group == null || group.isEmpty) return false;
+
+      final enrichedGroup = [
+        for (final candidate in group) _mergeMetadata(candidate, target),
+      ];
+      final byKey = <String, MediaItem>{
+        for (final existing in _sources) existing.storageKey: existing,
+      };
+      for (final candidate in enrichedGroup) {
+        final previous = byKey[candidate.storageKey];
+        byKey[candidate.storageKey] = previous == null
+            ? candidate
+            : _mergeMetadata(candidate, previous);
+        if (candidate.episodes.isNotEmpty) {
+          _emptySources.remove(candidate.storageKey);
+        }
+      }
+      final orderedKeys = <String>{
+        ...enrichedGroup.map((item) => item.storageKey),
+        ..._sources.map((item) => item.storageKey),
+      };
+      final mergedSources = [
+        for (final key in orderedKeys) byKey[key]!,
+      ];
+
+      // 若原历史/收藏记录的源也在命中组里且有选集，优先保留原源以对齐进度记录；
+      // 否则按命中组排序取第一个可用源。
+      final originalKey = widget.initialItem.storageKey;
+      MediaItem? preferred;
+      for (final candidate in enrichedGroup) {
+        if (candidate.storageKey == originalKey &&
+            !_emptySources.contains(originalKey)) {
+          preferred = byKey[originalKey];
+          break;
+        }
+      }
+      preferred ??= enrichedGroup
+          .map((item) => byKey[item.storageKey]!)
+          .where((item) => !_emptySources.contains(item.storageKey))
+          .firstOrNull;
+      if (preferred == null) return false;
+
+      final chosen = preferred;
+      setState(() {
+        _sources = mergedSources;
+        _selectedSource = chosen;
+        _item = chosen;
+        if (!_episodePickedByUser) {
+          _selectedEpisode = chosen.lastEpisodeIndex;
+        }
+      });
+      await _load(force: force, autoFallback: true);
+      await _checkFavorite();
+      return true;
+    } on Object {
+      return false;
+    } finally {
+      _resolvingSources = false;
     }
   }
 
@@ -207,10 +350,16 @@ class _DetailPageState extends ConsumerState<DetailPage> {
     if (item.episodes.isEmpty) return;
     final key = _selectedSource.storageKey;
     try {
-      final record = await ref
+      var record = await ref
           .read(appDependenciesProvider)
           .mediaRepository
           .playRecordFor(item);
+      if (record == null &&
+          item.storageKey == widget.initialItem.storageKey &&
+          (widget.initialItem.playTimeSeconds > 0 ||
+              widget.initialItem.lastEpisodeIndex > 0)) {
+        record = widget.initialItem;
+      }
       if (!mounted || record == null) return;
       // 期间可能切了片源/换了集，迟到的结果直接丢弃。
       if (_selectedSource.storageKey != key || _item.episodes.isEmpty) return;
@@ -284,10 +433,10 @@ class _DetailPageState extends ConsumerState<DetailPage> {
     await _checkFavorite();
   }
 
-  void _play() {
+  Future<void> _play() async {
     final item = _item;
     if (item.episodes.isEmpty) return;
-    context.push(
+    final playedItem = await context.push<MediaItem>(
       '/player',
       extra: PlaybackContext(
         item: item,
@@ -300,6 +449,19 @@ class _DetailPageState extends ConsumerState<DetailPage> {
         ),
       ),
     );
+    if (!mounted) return;
+    // 从播放页返回后：刷新播放记录缓存并立即更新「上次看到」与当前选集。
+    _episodePickedByUser = false;
+    if (playedItem != null &&
+        playedItem.storageKey != _selectedSource.storageKey &&
+        playedItem.episodes.isNotEmpty) {
+      setState(() {
+        _selectedSource = playedItem;
+        _item = _mergeMetadata(playedItem, _item);
+      });
+    }
+    await ref.read(appDependenciesProvider).mediaRepository.invalidatePlayRecords();
+    await _applyPlayRecord();
   }
 
   static String _formatSeconds(int seconds) {
@@ -349,8 +511,7 @@ class _DetailPageState extends ConsumerState<DetailPage> {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   if (_error != null) ...[
-                    // 详情接口失败时页面仍可用搜索结果播放，这里只做轻提示，
-                    // 不展示成严重错误。
+                    // 详情接口失败但已有搜索选集时仅做轻提示；若无选集则提供重新搜索入口。
                     Container(
                       padding: const EdgeInsets.fromLTRB(12, 8, 8, 8),
                       decoration: BoxDecoration(
@@ -367,7 +528,7 @@ class _DetailPageState extends ConsumerState<DetailPage> {
                           const SizedBox(width: 8),
                           Expanded(
                             child: Text(
-                              _sources.isEmpty
+                              item.episodes.isEmpty
                                   ? _error!
                                   : '详情补全失败，当前显示搜索结果：$_error',
                               maxLines: 2,
@@ -375,6 +536,11 @@ class _DetailPageState extends ConsumerState<DetailPage> {
                               style: Theme.of(context).textTheme.bodySmall,
                             ),
                           ),
+                          if (item.episodes.isEmpty)
+                            TextButton(
+                              onPressed: _resolvingSources ? null : _openSourceSearch,
+                              child: const Text('重新搜索片源'),
+                            ),
                           TextButton(
                             onPressed: _sources.isEmpty
                                 ? _resolveSources
@@ -445,13 +611,26 @@ class _DetailPageState extends ConsumerState<DetailPage> {
                   if (item.episodes.isEmpty)
                     Padding(
                       padding: const EdgeInsets.symmetric(vertical: 12),
-                      child: Text(
-                        _loading
-                            ? '正在获取选集…'
-                            : _sources.isEmpty
-                                ? '未找到可用片源，可返回搜索该片'
-                                : '该片源没有可用选集，试试切换其他播放源',
-                        style: Theme.of(context).textTheme.bodyMedium,
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            _loading || _resolvingSources
+                                ? '正在获取选集…'
+                                : _sources.isEmpty
+                                    ? '未找到可用片源，可重新搜索该片'
+                                    : '该片源没有可用选集，可重新搜索或切换其他播放源',
+                            style: Theme.of(context).textTheme.bodyMedium,
+                          ),
+                          if (!_loading && !_resolvingSources && _error == null) ...[
+                            const SizedBox(height: 10),
+                            OutlinedButton.icon(
+                              onPressed: _openSourceSearch,
+                              icon: const Icon(Icons.travel_explore, size: 18),
+                              label: const Text('重新搜索片源'),
+                            ),
+                          ],
+                        ],
                       ),
                     )
                   else
@@ -508,7 +687,7 @@ class _DetailPageState extends ConsumerState<DetailPage> {
                     children: [
                       Expanded(
                         child: FilledButton.icon(
-                          onPressed: item.episodes.isEmpty ? null : _play,
+                          onPressed: item.episodes.isEmpty ? null : () => unawaited(_play()),
                           icon: const Icon(Icons.play_arrow_rounded),
                           label: Text(
                             item.episodes.isEmpty
