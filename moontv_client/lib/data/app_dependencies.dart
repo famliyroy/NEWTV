@@ -10,6 +10,7 @@ import '../../core/auth/session_manager.dart';
 import '../../core/config/app_settings.dart';
 import '../../core/config/server_config.dart';
 import '../../core/network/dio_client.dart';
+import '../../core/player/ad_filter/local_ad_filter.dart';
 import '../../core/utils/image_url.dart';
 import '../../core/utils/local_resume_store.dart';
 import 'api/auth_api.dart';
@@ -46,6 +47,7 @@ class AppDependencies {
   final LocalResumeStore localResumeStore;
 
   static Future<AppDependencies> create() async {
+    unawaited(LocalAdFilter.clearCache());
     final preferences = await SharedPreferences.getInstance();
     const secureStorage = FlutterSecureStorage(
       aOptions: AndroidOptions(encryptedSharedPreferences: true),

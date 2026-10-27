@@ -1,3 +1,5 @@
+import 'dart:ui' as ui;
+
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:moontv_client/core/config/app_settings.dart';
@@ -7,6 +9,7 @@ import 'package:moontv_client/domain/models/danmaku.dart';
 import 'package:moontv_client/domain/models/media_item.dart';
 import 'package:moontv_client/features/danmaku/danmaku_controller.dart';
 import 'package:moontv_client/features/danmaku/danmaku_overlay.dart';
+import 'package:moontv_client/features/danmaku/danmaku_scene.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 class _FakeSource implements DanmakuSource {
@@ -193,5 +196,76 @@ void main() {
     expect(controller.matchedEpisode, '第1话');
     expect(controller.providerName, 'dandan');
     expect(controller.comments.length, 3);
+  });
+
+  test('位置跳变（seek / 广告断层）后丢弃 reset 前已进场弹幕，不从屏幕中间闪现', () {
+    final scene = DanmakuScene();
+    addTearDown(scene.dispose);
+
+    const comments = [
+      DanmakuComment(
+        time: 16.5,
+        text: '跳变前滚动弹幕（应丢弃）',
+        mode: DanmakuMode.scroll,
+        source: 'dandan',
+        id: 'old_scroll',
+      ),
+      DanmakuComment(
+        time: 18.0,
+        text: '跳变前顶部弹幕（应丢弃）',
+        mode: DanmakuMode.top,
+        source: 'dandan',
+        id: 'old_top',
+      ),
+      DanmakuComment(
+        time: 19.0,
+        text: '跳变前底部弹幕（应丢弃）',
+        mode: DanmakuMode.bottom,
+        source: 'dandan',
+        id: 'old_bottom',
+      ),
+      DanmakuComment(
+        time: 19.8,
+        text: '刚进场弹幕（保留）',
+        mode: DanmakuMode.scroll,
+        source: 'dandan',
+        id: 'edge_scroll',
+      ),
+      DanmakuComment(
+        time: 20.0,
+        text: '新进场弹幕（保留）',
+        mode: DanmakuMode.scroll,
+        source: 'dandan',
+        id: 'new_scroll',
+      ),
+    ];
+
+    scene.update(comments: comments, settings: const AppSettings());
+    expect(scene.resetAtPosition, isNull);
+
+    // 从 0s 跳变到 20.0s（差值 > 0.75s），触发 reset 并记录 _resetAtPosition = 20.0。
+    scene.setPosition(20.0);
+    expect(scene.resetAtPosition, 20.0);
+
+    final recorder = ui.PictureRecorder();
+    final canvas = Canvas(recorder);
+    scene.paint(canvas, const Size(800, 450));
+    recorder.endRecording().dispose();
+
+    final paintedIds =
+        scene.debugLastPaintedComments.map((c) => c.id).toList();
+    // comment.time < 20.0 - 0.3 (19.7) 的三条旧弹幕全部被跳过，不会闪现在屏幕中间。
+    expect(paintedIds, isNot(contains('old_scroll')));
+    expect(paintedIds, isNot(contains('old_top')));
+    expect(paintedIds, isNot(contains('old_bottom')));
+    // >= 19.7 的新弹幕正常从右缘进场绘制。
+    expect(paintedIds, containsAll(['edge_scroll', 'new_scroll']));
+
+    // 新一轮评论加载 update() 时清除 reset 状态。
+    scene.update(
+      comments: List<DanmakuComment>.from(comments),
+      settings: const AppSettings(),
+    );
+    expect(scene.resetAtPosition, isNull);
   });
 }

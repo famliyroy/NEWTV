@@ -1082,11 +1082,37 @@ class _ControlsOverlay extends StatelessWidget {
                               IconButton.filledTonal(onPressed: onBack, icon: const Icon(Icons.arrow_back)),
                               const SizedBox(width: 12),
                               Expanded(
-                                child: Text(
-                                  title,
-                                  maxLines: 1,
-                                  overflow: TextOverflow.ellipsis,
-                                  style: const TextStyle(color: Colors.white, fontSize: 17, fontWeight: FontWeight.w600),
+                                child: GestureDetector(
+                                  behavior: HitTestBehavior.opaque,
+                                  onLongPress: () {
+                                    onInteract();
+                                    ScaffoldMessenger.of(context)
+                                      ..hideCurrentSnackBar()
+                                      ..showSnackBar(
+                                        SnackBar(
+                                          content: Text(
+                                            player.activeRouteDescription,
+                                          ),
+                                          duration: const Duration(seconds: 3),
+                                          behavior: SnackBarBehavior.floating,
+                                        ),
+                                      );
+                                  },
+                                  child: Padding(
+                                    padding: const EdgeInsets.symmetric(
+                                      vertical: 6,
+                                    ),
+                                    child: Text(
+                                      title,
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: const TextStyle(
+                                        color: Colors.white,
+                                        fontSize: 17,
+                                        fontWeight: FontWeight.w600,
+                                      ),
+                                    ),
+                                  ),
                                 ),
                               ),
                               if (canSwitchSource)

@@ -39,6 +39,8 @@ class DanmakuScene {
   AppSettings? _settings;
   double _position = 0;
   double _lastPosition = 0;
+  double? _resetAtPosition;
+  final _lastPaintedComments = <DanmakuComment>[];
 
   /// 由 Overlay 根据「全局开关 + 播放页开关」设置。
   var visible = true;
@@ -54,6 +56,15 @@ class DanmakuScene {
   /// 当前绘制所使用的时间位置（秒）。由 Overlay 的 Ticker 每帧写入。
   double get position => _position;
 
+  /// 最近一次触发轨道重置时的播放位置（秒）；在新一轮评论加载 `update()` 时清除。
+  @visibleForTesting
+  double? get resetAtPosition => _resetAtPosition;
+
+  /// 最近一帧实际绘制的弹幕列表（仅供测试断言）。
+  @visibleForTesting
+  List<DanmakuComment> get debugLastPaintedComments =>
+      List.unmodifiable(_lastPaintedComments);
+
   /// 弹幕列表或渲染设置变化时调用。
   ///
   /// 只对**影响布局**的字段（字号/速度/显示区域）作废轨道分配，
@@ -67,6 +78,10 @@ class DanmakuScene {
     if (!commentsChanged && identical(previous, settings)) return;
     _comments = comments;
     _settings = settings;
+    if (commentsChanged) {
+      _resetAtPosition = null;
+      _allocator.reset();
+    }
     if (previous == null) return;
     if (previous.danmakuFontSize != settings.danmakuFontSize) {
       _clearGlyphs();
@@ -74,20 +89,27 @@ class DanmakuScene {
     final layoutChanged = previous.danmakuFontSize != settings.danmakuFontSize ||
         previous.danmakuSpeed != settings.danmakuSpeed ||
         previous.danmakuArea != settings.danmakuArea;
-    if (commentsChanged || layoutChanged) _allocator.reset();
+    if (layoutChanged) _allocator.reset();
   }
 
   void setPosition(double seconds) {
-    // seek / 切集造成的跳变：轨道状态已无意义，重新分配。
-    if ((seconds - _lastPosition).abs() > 0.75) _allocator.reset();
+    // seek / 切集 / 广告切片边界造成的位置跳变：轨道状态已无意义，重新分配并记录重置点。
+    if ((seconds - _lastPosition).abs() > 0.75) {
+      _allocator.reset();
+      _resetAtPosition = seconds;
+    }
     _lastPosition = seconds;
     _position = seconds;
   }
 
   /// seek 后强制重新分配轨道（即使位置跳变未超过阈值）。
-  void resetAllocation() => _allocator.reset();
+  void resetAllocation() {
+    _allocator.reset();
+    _resetAtPosition = _position;
+  }
 
   void paint(Canvas canvas, Size size) {
+    _lastPaintedComments.clear();
     final settings = _settings;
     if (!visible || settings == null || _comments.isEmpty || size.isEmpty) {
       return;
@@ -123,15 +145,25 @@ class DanmakuScene {
     final opacityKey = (settings.danmakuOpacity.clamp(0.0, 1.0) * 20).round();
 
     final startIndex = _lowerBound(_comments, _position - window);
+    final resetAt = _resetAtPosition;
     var painted = 0;
     for (var index = startIndex; index < _comments.length; index++) {
       if (painted >= limit) break;
       final comment = _comments[index];
       if (comment.time > _position + 0.5) break;
+      // 丢弃规则：reset 发生前就已进场的弹幕（含滚动、顶部、底部）不再绘制，
+      // 防止 seek 或广告切片跳变后半途弹幕直接闪现在屏幕中央。
+      if (resetAt != null && comment.time < resetAt - 0.3) continue;
       final age = _position - comment.time;
       if (age < 0) continue;
       final span = comment.mode == DanmakuMode.scroll ? window : fixedDuration;
       if (age > span) continue;
+      final key = _keyOf(comment);
+      // 从未入场分配过轨道的弹幕若已超过右缘入场窗口（0.35s），不中途补画。
+      if (_allocator.rowOf(key) == null && age > 0.35) {
+        _allocator.reject(key);
+        continue;
+      }
       if (_isBlocked(comment.text, settings.blockedWords)) continue;
 
       final glyph = _glyphFor(
@@ -141,7 +173,7 @@ class DanmakuScene {
         stroke: _needsStroke(comment.color),
       );
       final row = _allocator.allocate(
-        key: _keyOf(comment),
+        key: key,
         mode: comment.mode,
         time: comment.time,
         width: glyph.width,
@@ -152,7 +184,7 @@ class DanmakuScene {
       );
       // 轨道全满 → 丢弃这条，宁缺毋滥（避免一屏叠成墙），并记住不要再放。
       if (row == null) {
-        _allocator.reject(_keyOf(comment));
+        _allocator.reject(key);
         continue;
       }
 
@@ -163,6 +195,7 @@ class DanmakuScene {
       canvas.translate(offset.dx, offset.dy);
       canvas.drawPicture(glyph.picture);
       canvas.restore();
+      _lastPaintedComments.add(comment);
       painted++;
     }
   }

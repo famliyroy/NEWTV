@@ -11,6 +11,7 @@ import '../../core/config/server_config.dart';
 import '../../core/network/api_exception.dart';
 import '../../data/api/media_api.dart';
 import '../../domain/models/media_item.dart';
+import 'ad_filter/local_ad_filter.dart';
 import 'hls_quality.dart';
 
 /// 播放请求统一使用浏览器 UA：部分片源站 WAF 会拒绝
@@ -24,20 +25,31 @@ class PlayerController extends ChangeNotifier {
     required ServerConfig server,
     required SettingsController settings,
     Dio? dio,
+    LocalAdFilter? adFilter,
     this.onCompleted,
+    @visibleForTesting Future<void> Function(String url)? debugUrlOpener,
+    @visibleForTesting Future<void> Function(Duration target)? debugSeekHandler,
   })  : _server = server,
         _settings = settings,
         _dio = dio,
-        player = Player(
-          configuration: PlayerConfiguration(
-            logLevel: kDebugMode ? MPVLogLevel.info : MPVLogLevel.error,
-          ),
-        ) {
+        _adFilter = adFilter ?? (dio != null ? LocalAdFilter(dio: dio) : null),
+        _debugUrlOpener = debugUrlOpener,
+        _debugSeekHandler = debugSeekHandler {
+    if (_debugUrlOpener != null) {
+      return;
+    }
+    player = Player(
+      configuration: PlayerConfiguration(
+        logLevel: kDebugMode ? MPVLogLevel.info : MPVLogLevel.error,
+      ),
+    );
     videoController = VideoController(player);
-    // libmpv 走自己的 TLS 栈，dio 的「允许自签名证书」对它不生效。
-    if (server.allowSelfSigned) {
-      final platform = player.platform;
-      if (platform is NativePlayer) {
+    final platform = player.platform;
+    if (platform is NativePlayer) {
+      // 允许本地改写后的 ad_filter/*.m3u8 引用远程 http(s) 分片与密钥地址。
+      unawaited(platform.setProperty('load-unsafe-playlists', 'yes'));
+      // libmpv 走自己的 TLS 栈，dio 的「允许自签名证书」对它不生效。
+      if (server.allowSelfSigned) {
         unawaited(platform.setProperty('tls-verify', 'no'));
       }
     }
@@ -49,48 +61,14 @@ class PlayerController extends ChangeNotifier {
       );
     }
     _subscriptions.addAll([
-      player.stream.position.listen((value) {
-        _position = value;
-        notifyListeners();
-      }),
-      player.stream.duration.listen((value) {
-        _duration = value;
-        _consumeQualitySeek();
-        notifyListeners();
-      }),
-      player.stream.playing.listen((value) {
-        _playing = value;
-        notifyListeners();
-      }),
-      player.stream.buffering.listen((value) {
-        _buffering = value;
-        _consumeQualitySeek();
-        notifyListeners();
-      }),
+      player.stream.position.listen(handlePositionUpdate),
+      player.stream.duration.listen(handleDurationUpdate),
+      player.stream.playing.listen(handlePlayingUpdate),
+      player.stream.buffering.listen(handleBufferingUpdate),
       player.stream.completed.listen((completed) {
         if (completed) onCompleted?.call();
       }),
-      player.stream.error.listen((value) {
-        // 已经成功解析出媒体信息后的报错多为分片网络抖动，mpv 会自行重试，
-        // 不应中断播放界面。
-        if (_duration > Duration.zero) {
-          if (kDebugMode) debugPrint('MPV transient error: $value');
-          return;
-        }
-        // m3u8 与分片是两条独立链路：m3u8 经服务端可绕开部分源站的压缩编码
-        // 兼容问题，分片则直连更快。任一失败自动切换另一条，全部失败才提示。
-        if (_candidateIndex + 1 < _candidates.length) {
-          _candidateIndex++;
-          _error = null;
-          _errorDetail = null;
-          notifyListeners();
-          unawaited(_openUrl(_candidates[_candidateIndex]));
-          return;
-        }
-        _error = value.isEmpty ? '播放失败，请尝试切换片源' : '播放失败';
-        _errorDetail = _serverError ?? value;
-        notifyListeners();
-      }),
+      player.stream.error.listen(handleErrorEvent),
     ]);
   }
 
@@ -100,8 +78,12 @@ class PlayerController extends ChangeNotifier {
   /// 用户在设置页/播放页改的开关无需重进 APP 即可生效。
   final SettingsController _settings;
   final Dio? _dio;
+  final LocalAdFilter? _adFilter;
   final VoidCallback? onCompleted;
-  final Player player;
+  final Future<void> Function(String url)? _debugUrlOpener;
+  final Future<void> Function(Duration target)? _debugSeekHandler;
+
+  late final Player player;
   late final VideoController videoController;
   final _subscriptions = <StreamSubscription<dynamic>>[];
 
@@ -110,8 +92,12 @@ class PlayerController extends ChangeNotifier {
 
   PlaybackContext? _context;
   Duration _position = Duration.zero;
+  Duration _lastValidPosition = Duration.zero;
   Duration _duration = Duration.zero;
   Duration? _pendingQualitySeek;
+  Duration? _recentUserSeekTarget;
+  DateTime? _recentUserSeekAt;
+  var _seekZeroRecoveryAttempted = false;
   double _rate = 1.0;
   String? _errorDetail;
   String? _rawUrl;
@@ -120,7 +106,11 @@ class PlayerController extends ChangeNotifier {
   var _candidateIndex = 0;
   var _playing = false;
   var _buffering = false;
+  var _hasPlayedAnyFrame = false;
+  var _disposed = false;
+  var _openGeneration = 0;
   String? _error;
+  AdFilterResult? _localAdFilterResult;
   List<HlsVariant> _variants = const [];
   String _selectedQuality = autoQualityLabel;
   bool _singleStreamQuality = false;
@@ -134,6 +124,46 @@ class PlayerController extends ChangeNotifier {
   bool get buffering => _buffering;
   String? get error => _error;
   String? get errorDetail => _errorDetail;
+  List<String> get candidates => List.unmodifiable(_candidates);
+  int get candidateIndex => _candidateIndex;
+  AdFilterResult? get localAdFilterResult => _localAdFilterResult;
+
+  /// 当前正在使用的候选播放地址。
+  String? get currentCandidateUrl {
+    if (_candidates.isEmpty ||
+        _candidateIndex < 0 ||
+        _candidateIndex >= _candidates.length) {
+      return null;
+    }
+    return _candidates[_candidateIndex];
+  }
+
+  /// 当前生效的播放链路简短名称（用于诊断展示）。
+  ///
+  /// 取值：`本地过滤` / `服务端代理` / `直连` / `全量代理`。
+  String get activeRouteLabel {
+    final url = currentCandidateUrl;
+    if (url == null || url.isEmpty) return '直连';
+    if (url.startsWith('file://')) return '本地过滤';
+    if (url.contains('/api/proxy-m3u8')) {
+      if (url.contains('proxySegments=true')) return '全量代理';
+      return '服务端代理';
+    }
+    return '直连';
+  }
+
+  /// 当前生效播放链路的详细诊断说明（长按播放页标题展示）。
+  String get activeRouteDescription {
+    final label = activeRouteLabel;
+    final filterResult = _localAdFilterResult;
+    if (label == '本地过滤' && filterResult != null) {
+      return '当前链路：本地过滤（已剔除 ${filterResult.removedSegments}/${filterResult.totalSegments} 段广告切片）';
+    }
+    if (_settings.settings.adblock && filterResult?.skippedLive == true) {
+      return '当前链路：$label（直播流已跳过本地过滤）';
+    }
+    return '当前链路：$label';
+  }
 
   /// 可选清晰度（已测速）；空表示尚未探测完或单码率。
   List<HlsVariant> get variants => _variants;
@@ -146,16 +176,102 @@ class PlayerController extends ChangeNotifier {
     return current.episodeIndex + 1 < current.item.episodes.length;
   }
 
+  @visibleForTesting
+  void handlePositionUpdate(Duration value) {
+    _position = value;
+    if (value > const Duration(seconds: 2)) {
+      _lastValidPosition = value;
+    }
+    if (_playing && !_buffering && value > Duration.zero) {
+      _hasPlayedAnyFrame = true;
+    }
+    _checkUnexpectedResetAfterSeek(value);
+    notifyListeners();
+  }
+
+  @visibleForTesting
+  void handleDurationUpdate(Duration value) {
+    _duration = value;
+    _consumeQualitySeek();
+    notifyListeners();
+  }
+
+  @visibleForTesting
+  void handlePlayingUpdate(bool value) {
+    _playing = value;
+    if (value && !_buffering && _position > Duration.zero) {
+      _hasPlayedAnyFrame = true;
+    }
+    notifyListeners();
+  }
+
+  @visibleForTesting
+  void handleBufferingUpdate(bool value) {
+    _buffering = value;
+    if (!value && _playing && _position > Duration.zero) {
+      _hasPlayedAnyFrame = true;
+    }
+    _consumeQualitySeek();
+    if (!value) {
+      _checkUnexpectedResetAfterSeek(_position);
+    }
+    notifyListeners();
+  }
+
+  @visibleForTesting
+  void handleErrorEvent(String value) {
+    // 已经成功出帧且仍在播放中的报错多为单个分片网络抖动，mpv 会自行重试，不应中断界面。
+    // 注意：本地 file:// m3u8 在未下载任何分片前就会立即解析出 _duration > 0，
+    // 因此必须以 _hasPlayedAnyFrame && _playing 判断是否已稳定起播。
+    if (_hasPlayedAnyFrame && _playing) {
+      if (kDebugMode) debugPrint('MPV transient error: $value');
+      return;
+    }
+    if (_candidateIndex + 1 < _candidates.length) {
+      unawaited(switchToNextCandidate());
+      return;
+    }
+    _error = value.isEmpty ? '播放失败，请尝试切换片源' : '播放失败';
+    _errorDetail = _serverError ?? value;
+    notifyListeners();
+  }
+
+  /// 切换到下一个候选链路，并保留当前播放进度（防止从零播放）。
+  Future<bool> switchToNextCandidate() async {
+    if (_candidateIndex + 1 >= _candidates.length) return false;
+    final resume = _position > const Duration(seconds: 2)
+        ? _position
+        : _lastValidPosition;
+    if (resume > const Duration(seconds: 2)) {
+      _pendingQualitySeek ??= resume;
+    }
+    _candidateIndex++;
+    _error = null;
+    _errorDetail = null;
+    _hasPlayedAnyFrame = false;
+    notifyListeners();
+    await _openUrl(_candidates[_candidateIndex], preservePosition: true);
+    return true;
+  }
+
   Future<void> open(PlaybackContext context) async {
+    final generation = ++_openGeneration;
     _context = context;
     _error = null;
     _errorDetail = null;
     _position = Duration.zero;
+    _lastValidPosition = Duration.zero;
     _duration = Duration.zero;
+    _hasPlayedAnyFrame = false;
     _variants = const [];
     _selectedQuality = autoQualityLabel;
     _pendingQualitySeek = null;
+    _recentUserSeekTarget = null;
+    _recentUserSeekAt = null;
+    _seekZeroRecoveryAttempted = false;
+    _localAdFilterResult = null;
     notifyListeners();
+
     final episodes = context.item.episodes;
     if (episodes.isEmpty) {
       _error = '该片源没有可播放的地址，请返回切换其他片源';
@@ -184,38 +300,93 @@ class PlayerController extends ChangeNotifier {
       proxySegments: true,
     );
 
-    // 依次尝试：服务端取 m3u8（避开 Brotli 压缩）→ 直连源站 → 全量代理分片。
-    final candidates = <String>[proxyUrl, _rawUrl!];
-    if (proxyAllUrl != proxyUrl) candidates.add(proxyAllUrl);
-    _candidates = candidates;
-    _candidateIndex = 0;
+    final baseCandidates = <String>[proxyUrl, _rawUrl!];
+    if (proxyAllUrl != proxyUrl) baseCandidates.add(proxyAllUrl);
 
-    // 先预检代理链路：服务端取流失败时会返回具体 error，
-    // 提前跳过可以省掉一次 mpv 失败等待，也能把真实原因显示给用户。
-    if (_dio != null) {
-      final reason = await _probeProxy(proxyUrl);
-      if (reason != null) {
-        _serverError = reason;
-        if (_candidates.length > 1) _candidateIndex = 1;
-        if (kDebugMode) debugPrint('NEWTV proxy probe failed: $reason');
+    if (settings.adblock &&
+        _adFilter != null &&
+        _rawUrl!.toLowerCase().contains('.m3u8')) {
+      final filterResult = await _adFilter.prepare(
+        rawUrl: _rawUrl!,
+        proxyUrl: proxyUrl,
+        serverBaseUrl: _server.baseUrl,
+        source: context.item.source,
+        mediaId: '${context.item.id}_$index',
+        playbackToken: settings.playbackToken,
+        proxySegments: settings.proxySegments,
+        preferredQuality: _selectedQuality,
+      );
+      if (_disposed || generation != _openGeneration) return;
+      _localAdFilterResult = filterResult;
+      if (filterResult.proxyError != null) {
+        _serverError = filterResult.proxyError;
+      }
+      if (filterResult.isSuccess) {
+        // 候选顺序：[本地过滤文件, 服务端代理, 直连, 全量代理]
+        _candidates = <String>[filterResult.fileUri!, ...baseCandidates];
+        _candidateIndex = 0;
+      } else {
+        _candidates = baseCandidates;
+        _candidateIndex =
+            (filterResult.proxyError != null && _candidates.length > 1) ? 1 : 0;
+      }
+    } else {
+      _candidates = baseCandidates;
+      _candidateIndex = 0;
+      // 先预检代理链路：服务端取流失败时会返回具体 error，
+      // 提前跳过可以省掉一次 mpv 失败等待，也能把真实原因显示给用户。
+      if (_dio != null) {
+        final reason = await _probeProxy(proxyUrl);
+        if (_disposed || generation != _openGeneration) return;
+        if (reason != null) {
+          _serverError = reason;
+          if (_candidates.length > 1) _candidateIndex = 1;
+          if (kDebugMode) debugPrint('NEWTV proxy probe failed: $reason');
+        }
       }
     }
 
-    if (kDebugMode) debugPrint('NEWTV play url: ${_candidates[_candidateIndex]}');
-    await _openUrl(_candidates[_candidateIndex]);
+    if (kDebugMode) {
+      debugPrint(
+        'NEWTV play url ($activeRouteLabel): ${_candidates[_candidateIndex]}',
+      );
+    }
+    await _openUrl(_candidates[_candidateIndex], preservePosition: false);
+    if (_disposed || generation != _openGeneration) return;
     // 清晰度探测不阻塞起播：拿到 master 后逐档测速，完成后再刷新菜单。
-    if (_rawUrl != null && _rawUrl!.contains('.m3u8')) {
+    if (_rawUrl != null && _rawUrl!.toLowerCase().contains('.m3u8')) {
       unawaited(_probeQuality());
     }
   }
 
-  /// 清晰度切换后恢复原播放位置（仅用于播放中切码率，初始断点续播由播放页缓冲就绪信号统一接管）。
+  /// 清晰度切换或候选降级重开后恢复原播放位置。
   void _consumeQualitySeek() {
     final target = _pendingQualitySeek;
     if (target == null || _duration <= Duration.zero || _buffering) return;
     _pendingQualitySeek = null;
     if (target <= Duration.zero) return;
     unawaited(seek(target));
+  }
+
+  /// 防快进回零兜底：若用户刚执行了前进/拖动 seek（目标 >= 15s），
+  /// 但底层流因未过滤的 #EXT-X-DISCONTINUITY 导致 PTS 重置到 0:00（< 3s），自动补跳一次。
+  void _checkUnexpectedResetAfterSeek(Duration currentPos) {
+    final target = _recentUserSeekTarget;
+    final seekAt = _recentUserSeekAt;
+    if (target == null || seekAt == null || _seekZeroRecoveryAttempted) return;
+    final elapsed = DateTime.now().difference(seekAt);
+    if (elapsed > const Duration(milliseconds: 2800)) {
+      _recentUserSeekTarget = null;
+      _recentUserSeekAt = null;
+      return;
+    }
+    if (!_buffering &&
+        _duration > Duration.zero &&
+        target >= const Duration(seconds: 15) &&
+        currentPos < const Duration(seconds: 3)) {
+      _seekZeroRecoveryAttempted = true;
+      unawaited(_performSeek(target));
+    }
   }
 
   /// 拉取 master playlist 并测速。失败时静默降级为「自动（单一流）」。
@@ -294,32 +465,66 @@ class PlayerController extends ChangeNotifier {
   }
 
   Future<void> _openVariant(HlsVariant variant, {required String label}) async {
+    final generation = ++_openGeneration;
     final context = _context;
     final settings = _settings.settings;
-    final resume = _position;
-    final proxy = MediaApi.buildProxyUrl(
-      baseUrl: _server.baseUrl,
-      rawUrl: variant.url,
-      source: context?.item.source ?? '',
-      playbackToken: settings.playbackToken,
-      adblock: settings.adblock,
-      proxySegments: settings.proxySegments,
-    );
-    _candidates = sourceUriOf(variant.url) != null
-        // 服务端已把它重写成代理地址，直接用，避免二次包裹。
-        ? [variant.url]
-        : (proxy == variant.url ? [variant.url] : [proxy, variant.url]);
+    final resume = _position > const Duration(seconds: 2)
+        ? _position
+        : _lastValidPosition;
+    final rawVariantUrl =
+        (sourceUriOf(variant.url) ?? Uri.parse(variant.url)).toString();
+    final proxy = sourceUriOf(variant.url) != null
+        ? variant.url
+        : MediaApi.buildProxyUrl(
+            baseUrl: _server.baseUrl,
+            rawUrl: rawVariantUrl,
+            source: context?.item.source ?? '',
+            playbackToken: settings.playbackToken,
+            adblock: settings.adblock,
+            proxySegments: settings.proxySegments,
+          );
+    final baseCandidates = sourceUriOf(variant.url) != null
+        // 服务端已把它重写成代理地址，补上源站直连作回退。
+        ? <String>[variant.url, rawVariantUrl]
+        : (proxy == variant.url
+            ? <String>[variant.url]
+            : <String>[proxy, variant.url]);
+
+    if (settings.adblock && _adFilter != null) {
+      final filterResult = await _adFilter.prepare(
+        rawUrl: rawVariantUrl,
+        proxyUrl: proxy,
+        serverBaseUrl: _server.baseUrl,
+        source: context?.item.source ?? '',
+        mediaId: '${context?.item.id ?? ''}_${context?.episodeIndex ?? 0}_$label',
+        playbackToken: settings.playbackToken,
+        proxySegments: settings.proxySegments,
+        preferredQuality: label,
+      );
+      if (_disposed || generation != _openGeneration) return;
+      _localAdFilterResult = filterResult;
+      _candidates = filterResult.isSuccess
+          ? <String>[filterResult.fileUri!, ...baseCandidates]
+          : baseCandidates;
+    } else {
+      _localAdFilterResult = null;
+      _candidates = baseCandidates;
+    }
+
     _candidateIndex = 0;
     _selectedQuality = label;
     _error = null;
     _errorDetail = null;
     _duration = Duration.zero;
     _position = Duration.zero;
+    _hasPlayedAnyFrame = false;
     _pendingQualitySeek =
         resume > const Duration(seconds: 2) ? resume : null;
     notifyListeners();
-    if (kDebugMode) debugPrint('NEWTV switch quality ($label): ${_candidates.first}');
-    await _openUrl(_candidates.first);
+    if (kDebugMode) {
+      debugPrint('NEWTV switch quality ($label): ${_candidates.first}');
+    }
+    await _openUrl(_candidates.first, preservePosition: false);
   }
 
   /// 打开前用 dio 取回播放列表开头，判断服务端是否成功取流。
@@ -340,7 +545,8 @@ class PlayerController extends ChangeNotifier {
         return '服务端取流失败（HTTP $status）';
       }
       final contentType =
-          (response.headers.value(Headers.contentTypeHeader) ?? '').toLowerCase();
+          (response.headers.value(Headers.contentTypeHeader) ?? '')
+              .toLowerCase();
       final bytes = response.data ?? const <int>[];
       if (contentType.contains('json')) {
         final text = utf8.decode(bytes, allowMalformed: true);
@@ -369,8 +575,21 @@ class PlayerController extends ChangeNotifier {
     return null;
   }
 
-  Future<void> _openUrl(String url) async {
+  Future<void> _openUrl(String url, {bool preservePosition = true}) async {
+    if (preservePosition && _pendingQualitySeek == null) {
+      final resume = _position > const Duration(seconds: 2)
+          ? _position
+          : _lastValidPosition;
+      if (resume > const Duration(seconds: 2)) {
+        _pendingQualitySeek = resume;
+      }
+    }
     try {
+      final opener = _debugUrlOpener;
+      if (opener != null) {
+        await opener(url);
+        return;
+      }
       await player.open(
         Media(
           url,
@@ -395,28 +614,58 @@ class PlayerController extends ChangeNotifier {
   }
 
   Future<void> toggle() async => _playing ? player.pause() : player.play();
+
   Future<void> seek(Duration value) {
     final target = value < Duration.zero
         ? Duration.zero
         : (_duration > Duration.zero && value > _duration
             ? _duration
             : value);
+    if (target > const Duration(seconds: 2)) {
+      _lastValidPosition = target;
+    }
+    if (target >= const Duration(seconds: 15)) {
+      _recentUserSeekTarget = target;
+      _recentUserSeekAt = DateTime.now();
+      _seekZeroRecoveryAttempted = false;
+    } else {
+      _recentUserSeekTarget = null;
+      _recentUserSeekAt = null;
+    }
+    return _performSeek(target);
+  }
+
+  Future<void> _performSeek(Duration target) {
+    final handler = _debugSeekHandler;
+    if (handler != null) {
+      return handler(target);
+    }
     return player.seek(target);
   }
+
   Future<void> seekRelative(Duration delta) => seek(_position + delta);
+
   Future<void> setRate(double rate) {
     _rate = rate;
     notifyListeners();
+    if (_debugUrlOpener != null) return Future.value();
     return player.setRate(rate);
   }
-  Future<void> setVolume(double volume) => player.setVolume(volume.clamp(0, 100));
+
+  Future<void> setVolume(double volume) {
+    if (_debugUrlOpener != null) return Future.value();
+    return player.setVolume(volume.clamp(0, 100));
+  }
 
   @override
   void dispose() {
+    _disposed = true;
     for (final subscription in _subscriptions) {
       unawaited(subscription.cancel());
     }
-    unawaited(player.dispose());
+    if (_debugUrlOpener == null) {
+      unawaited(player.dispose());
+    }
     super.dispose();
   }
 }

@@ -100,7 +100,6 @@ class _DanmakuOverlayState extends State<DanmakuOverlay>
     // 弹幕列表换了（加载完成/切集）才同步，纯位置更新只改锚点。
     if (!identical(_scene.comments, controller.comments)) {
       _scene.update(comments: controller.comments, settings: widget.settings);
-      _scene.resetAllocation();
     }
     _scene.visible = _visible;
     _clock.setRate(controller.rate);

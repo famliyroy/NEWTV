@@ -82,7 +82,9 @@ class SettingsPage extends ConsumerWidget {
               SwitchListTile(
                 contentPadding: EdgeInsets.zero,
                 title: const Text('服务端去广告切片'),
-                subtitle: const Text('经 /api/proxy-m3u8 剔除插播广告；服务器连不上片源时会自动改回直连'),
+                subtitle: const Text(
+                  '开启后由本地去广告插件 + /api/proxy-m3u8 双重剔除插播广告与 DISCONTINUITY 断层；播放页长按顶部标题可查看当前生效链路（本地过滤 / 服务端代理 / 直连 / 全量代理）',
+                ),
                 value: settings.adblock,
                 onChanged: (value) =>
                     update((current) => current.copyWith(adblock: value)),
