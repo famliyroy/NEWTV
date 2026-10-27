@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -8,7 +10,7 @@ class AppSettings {
     this.reduceMotion = false,
     this.danmakuEnabled = true,
     this.danmakuOpacity = 0.85,
-    this.danmakuFontSize = 25,
+    this.danmakuFontSize = 19,
     this.danmakuSpeed = 1,
     this.danmakuArea = 0.75,
     this.danmakuMaxSources = 12,
@@ -95,12 +97,13 @@ class AppSettings {
 
 class SettingsController extends ChangeNotifier {
   SettingsController(this._preferences) {
+    _migrateDanmakuFont();
     _settings = AppSettings(
       themeModeIndex: _preferences.getInt('theme') ?? 0,
       reduceMotion: _preferences.getBool('reduceMotion') ?? false,
       danmakuEnabled: _preferences.getBool('danmakuEnabled') ?? true,
       danmakuOpacity: _preferences.getDouble('danmakuOpacity') ?? 0.85,
-      danmakuFontSize: _preferences.getDouble('danmakuFontSize') ?? 25,
+      danmakuFontSize: _preferences.getDouble('danmakuFontSize') ?? 19,
       danmakuSpeed: _preferences.getDouble('danmakuSpeed') ?? 1,
       danmakuArea: _preferences.getDouble('danmakuArea') ?? 0.75,
       danmakuMaxSources: _preferences.getInt('danmakuMaxSources') ?? 12,
@@ -118,9 +121,23 @@ class SettingsController extends ChangeNotifier {
     );
   }
 
+  /// 一次性迁移标记：旧版本默认字号是 25，仅改默认值对老安装无效。
+  static const danmakuFontMigrationKey = 'danmaku_font_migrated_v016';
+
   final SharedPreferences _preferences;
   late AppSettings _settings;
   AppSettings get settings => _settings;
+
+  /// 老安装里持久化的 25 是旧默认值，改写成新默认 19；
+  /// 用户手动调过的其它值一律不动。
+  void _migrateDanmakuFont() {
+    if (_preferences.getBool(danmakuFontMigrationKey) ?? false) return;
+    final stored = _preferences.getDouble('danmakuFontSize');
+    if (stored != null && (stored - 25).abs() < 0.01) {
+      unawaited(_preferences.setDouble('danmakuFontSize', 19));
+    }
+    unawaited(_preferences.setBool(danmakuFontMigrationKey, true));
+  }
 
   Future<void> update(AppSettings value) async {
     _settings = value;

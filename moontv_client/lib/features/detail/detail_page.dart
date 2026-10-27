@@ -32,6 +32,9 @@ class _DetailPageState extends ConsumerState<DetailPage> {
   var _favoriteBusy = false;
   var _resolvingSources = false;
 
+  /// 用户是否手动点过选集：点过就不再用播放记录覆盖选集位置。
+  var _episodePickedByUser = false;
+
   @override
   void initState() {
     super.initState();
@@ -182,6 +185,8 @@ class _DetailPageState extends ConsumerState<DetailPage> {
         }
       } else {
         _emptySources.remove(source.storageKey);
+        // 详情拿到集数后补全「上次看到哪一集、哪一秒」。
+        await _applyPlayRecord();
       }
     } catch (error) {
       if (!mounted || !identical(source, _selectedSource)) return;
@@ -189,6 +194,40 @@ class _DetailPageState extends ConsumerState<DetailPage> {
         _loading = false;
         _error = readableError(error);
       });
+    }
+  }
+
+  /// 用播放记录补全续播点。
+  ///
+  /// 之前只有从首页「继续观看」进的条目才带 lastEpisodeIndex/playTimeSeconds，
+  /// 从搜索/发现/推荐进来的恒为 0，所以永远从头播。
+  Future<void> _applyPlayRecord() async {
+    final item = _item;
+    if (item.episodes.isEmpty) return;
+    final key = _selectedSource.storageKey;
+    try {
+      final record = await ref
+          .read(appDependenciesProvider)
+          .mediaRepository
+          .playRecordFor(item);
+      if (!mounted || record == null) return;
+      if (_selectedSource.storageKey != key || _item.episodes.isEmpty) return;
+      final index = record.lastEpisodeIndex.clamp(0, _item.episodes.length - 1);
+      final seconds = record.playTimeSeconds;
+      if (index <= 0 && seconds <= 0) return;
+      // 记录停在片尾（差 30 秒内）视为已看完，只定位集数、不再续播末段。
+      final finished = record.totalTimeSeconds > 0 &&
+          seconds >= record.totalTimeSeconds - 30;
+      setState(() {
+        _item = _item.copyWith(
+          lastEpisodeIndex: index,
+          playTimeSeconds: finished ? 0 : seconds,
+          totalTimeSeconds: record.totalTimeSeconds,
+        );
+        if (!_episodePickedByUser) _selectedEpisode = index;
+      });
+    } on Object {
+      // 记录拉取失败不影响详情展示。
     }
   }
 
@@ -210,6 +249,7 @@ class _DetailPageState extends ConsumerState<DetailPage> {
       _selectedSource = source;
       _item = source;
       _selectedEpisode = source.lastEpisodeIndex;
+      _episodePickedByUser = false;
     });
     _load(autoFallback: false);
     _checkFavorite();
@@ -258,6 +298,15 @@ class _DetailPageState extends ConsumerState<DetailPage> {
             : 0,
       ),
     );
+  }
+
+  static String _formatSeconds(int seconds) {
+    final hours = seconds ~/ 3600;
+    final minutes = (seconds % 3600) ~/ 60;
+    final rest = seconds % 60;
+    final mm = minutes.toString().padLeft(2, '0');
+    final ss = rest.toString().padLeft(2, '0');
+    return hours > 0 ? '$hours:$mm:$ss' : '$mm:$ss';
   }
 
   static String _episodeLabel(MediaItem item, int index) {
@@ -413,10 +462,45 @@ class _DetailPageState extends ConsumerState<DetailPage> {
                             index: index,
                             label: _episodeLabel(item, index),
                             selected: index == _selectedEpisode,
-                            onTap: () => setState(() => _selectedEpisode = index),
+                            resume: index == item.lastEpisodeIndex &&
+                                item.playTimeSeconds > 0,
+                            onTap: () => setState(() {
+                              _selectedEpisode = index;
+                              _episodePickedByUser = true;
+                            }),
                           ),
                       ],
                     ),
+                  if (item.playTimeSeconds > 0 && item.episodes.isNotEmpty) ...[
+                    const SizedBox(height: 12),
+                    Row(
+                      children: [
+                        Icon(
+                          Icons.history,
+                          size: 16,
+                          color: Theme.of(context).colorScheme.primary,
+                        ),
+                        const SizedBox(width: 6),
+                        Expanded(
+                          child: Text(
+                            '上次看到 ${_episodeLabel(item, item.lastEpisodeIndex.clamp(0, item.episodes.length - 1))} ${_formatSeconds(item.playTimeSeconds)}',
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: Theme.of(context).textTheme.bodySmall,
+                          ),
+                        ),
+                        if (_selectedEpisode != item.lastEpisodeIndex)
+                          TextButton(
+                            onPressed: () => setState(() {
+                              _selectedEpisode = item.lastEpisodeIndex
+                                  .clamp(0, item.episodes.length - 1);
+                              _episodePickedByUser = true;
+                            }),
+                            child: const Text('回到上次'),
+                          ),
+                      ],
+                    ),
+                  ],
                   const SizedBox(height: 22),
                   Row(
                     children: [
@@ -727,8 +811,19 @@ class _SourceSearchSheetState extends ConsumerState<_SourceSearchSheet> {
               ),
             ),
             Padding(
-              padding: const EdgeInsets.fromLTRB(20, 14, 20, 0),
-              child: Text('搜索更多片源', style: theme.textTheme.titleMedium),
+              padding: const EdgeInsets.fromLTRB(20, 14, 8, 0),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: Text('搜索更多片源', style: theme.textTheme.titleMedium),
+                  ),
+                  IconButton(
+                    tooltip: '关闭',
+                    onPressed: () => Navigator.of(context).maybePop(),
+                    icon: const Icon(Icons.close),
+                  ),
+                ],
+              ),
             ),
             Padding(
               padding: const EdgeInsets.fromLTRB(20, 10, 20, 8),
@@ -813,11 +908,15 @@ class _EpisodeChip extends StatelessWidget {
     required this.label,
     required this.selected,
     required this.onTap,
+    this.resume = false,
   });
 
   final int index;
   final String label;
   final bool selected;
+
+  /// 该集是上次观看的位置，加「上次」角标。
+  final bool resume;
   final VoidCallback onTap;
 
   @override
@@ -831,13 +930,39 @@ class _EpisodeChip extends StatelessWidget {
         onTap: onTap,
         child: Padding(
           padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-          child: Text(
-            label,
-            style: TextStyle(
-              fontSize: 13,
-              fontWeight: selected ? FontWeight.w700 : FontWeight.w500,
-              color: selected ? scheme.onPrimary : scheme.onSurface,
-            ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              if (resume) ...[
+                Container(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
+                  decoration: BoxDecoration(
+                    color: (selected ? scheme.onPrimary : scheme.primary)
+                        .withValues(alpha: 0.16),
+                    borderRadius: BorderRadius.circular(4),
+                  ),
+                  child: Text(
+                    '上次',
+                    style: TextStyle(
+                      fontSize: 9,
+                      height: 1.1,
+                      fontWeight: FontWeight.w700,
+                      color: selected ? scheme.onPrimary : scheme.primary,
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 6),
+              ],
+              Text(
+                label,
+                style: TextStyle(
+                  fontSize: 13,
+                  fontWeight: selected ? FontWeight.w700 : FontWeight.w500,
+                  color: selected ? scheme.onPrimary : scheme.onSurface,
+                ),
+              ),
+            ],
           ),
         ),
       ),

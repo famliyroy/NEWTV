@@ -36,6 +36,7 @@ class DanmakuController extends ChangeNotifier {
   Future<DanmakuLoadResult>? _operation;
   PlaybackContext? _lastContext;
   var _wasEnabled = true;
+  var _playing = true;
   DanmakuLoadResult? _result;
   var _generation = 0;
 
@@ -75,6 +76,16 @@ class DanmakuController extends ChangeNotifier {
   void setPosition(double seconds) {
     if ((_position - seconds).abs() < 0.05) return;
     _position = seconds;
+    notifyListeners();
+  }
+
+  /// 播放器是否在推进。弹幕层据此启停 60fps Ticker：
+  /// 暂停时停帧，既省电，也避免弹幕越过暂停画面。
+  bool get playing => _playing;
+
+  void setPlaying(bool value) {
+    if (_playing == value) return;
+    _playing = value;
     notifyListeners();
   }
 

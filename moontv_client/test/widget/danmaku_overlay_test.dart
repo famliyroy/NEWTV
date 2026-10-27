@@ -124,6 +124,60 @@ void main() {
     await tester.pump(const Duration(seconds: 6));
   });
 
+  testWidgets('渲染参数热更新不抛异常（字号/透明度/速度/显示区域）', (tester) async {
+    final preferences = await SharedPreferences.getInstance();
+    final settings = SettingsController(preferences);
+    final controller = DanmakuController(
+      DanmakuRepository(_FakeSource(_comments(200))),
+      settings,
+    );
+    addTearDown(controller.dispose);
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: SizedBox(
+          width: 800,
+          height: 400,
+          child: DanmakuOverlay(
+            controller: controller,
+            settings: settings.settings,
+          ),
+        ),
+      ),
+    );
+    await tester.runAsync(() => controller.loadFor(_context()));
+    await tester.pump();
+    controller.setPosition(1.2);
+    await tester.pump(const Duration(milliseconds: 16));
+
+    for (final next in [
+      settings.settings.copyWith(danmakuOpacity: 0.4),
+      settings.settings.copyWith(danmakuFontSize: 30),
+      settings.settings.copyWith(danmakuSpeed: 1.6),
+      settings.settings.copyWith(danmakuArea: 0.5),
+      settings.settings.copyWith(blockedWords: '弹幕内容 1'),
+    ]) {
+      await settings.update(next);
+      // 必须重建 Overlay 才能把新设置传下去（播放页就是 ref.watch 重建）。
+      await tester.pumpWidget(
+        MaterialApp(
+          home: SizedBox(
+            width: 800,
+            height: 400,
+            child: DanmakuOverlay(
+              controller: controller,
+              settings: settings.settings,
+            ),
+          ),
+        ),
+      );
+      controller.setPosition(1.4);
+      await tester.pump(const Duration(milliseconds: 16));
+      expect(tester.takeException(), isNull);
+    }
+    await tester.pump(const Duration(seconds: 6));
+  });
+
   test('加载完成后暴露数据源与命中信息', () async {
     SharedPreferences.setMockInitialValues({});
     final preferences = await SharedPreferences.getInstance();

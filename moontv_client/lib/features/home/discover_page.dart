@@ -1,4 +1,3 @@
-import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
@@ -7,6 +6,7 @@ import '../../domain/models/media_item.dart';
 import '../../providers.dart';
 import '../../shared/widgets/error_view.dart';
 import '../../shared/widgets/skeleton_box.dart';
+import '../../shared/widgets/smart_image.dart';
 
 /// 发现页数据：按分类从服务端取推荐，`trending` 为混合热门榜。
 final discoverFeedProvider =
@@ -195,12 +195,12 @@ class _DiscoverCard extends StatelessWidget {
                   if (item.poster.isEmpty)
                     ColoredBox(color: scheme.surfaceContainerHighest)
                   else
-                    CachedNetworkImage(
-                      imageUrl: item.poster,
+                    // 豆瓣/TMDB 海报有防盗链，直连必失败 → 统一走图片代理 + 直连回退。
+                    SmartImage(
+                      url: item.poster,
                       fit: BoxFit.cover,
-                      fadeInDuration: const Duration(milliseconds: 120),
-                      placeholder: (context, url) => const SkeletonBox(height: 180),
-                      errorWidget: (context, url, error) => ColoredBox(
+                      placeholder: const SkeletonBox(height: 180),
+                      errorBuilder: (context) => ColoredBox(
                         color: scheme.surfaceContainerHighest,
                         child: const Icon(Icons.broken_image_outlined),
                       ),

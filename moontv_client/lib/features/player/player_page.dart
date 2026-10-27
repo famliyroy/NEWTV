@@ -36,6 +36,10 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
   double? _previousRate;
   BoxFit _videoFit = BoxFit.contain;
 
+  /// 断点续播提示（秒）；非空时在左下角显示「上次播放到 XX:XX，点击跳转」。
+  int? _resumeHint;
+  Timer? _resumeHintTimer;
+
   @override
   void initState() {
     super.initState();
@@ -50,7 +54,11 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
       onCompleted: _handleEpisodeCompleted,
     );
     _danmaku = DanmakuController(dependencies.danmakuRepository, dependencies.settings);
-    _player.addListener(() => _danmaku.setPosition(_player.position.inMilliseconds / 1000));
+    _player.addListener(() {
+      _danmaku
+        ..setPosition(_player.position.inMilliseconds / 1000)
+        ..setPlaying(_player.playing);
+    });
     unawaited(_player.open(_currentPlayback));
     unawaited(_danmaku.loadFor(_currentPlayback));
     _progressSyncTimer = Timer.periodic(
@@ -59,6 +67,36 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
     );
     _enterImmersiveMode();
     _scheduleHide();
+    unawaited(_checkResumeHint());
+  }
+
+  /// 兜底续播：详情页没带初始位置时（例如从搜索直接进来），
+  /// 再查一次播放记录，命中同集且 >10s 时给一个可点击的提示。
+  Future<void> _checkResumeHint() async {
+    if (_currentPlayback.initialPositionSeconds > 0) return;
+    try {
+      final record = await ref
+          .read(appDependenciesProvider)
+          .mediaRepository
+          .playRecordFor(_currentPlayback.item);
+      if (!mounted || record == null) return;
+      if (record.lastEpisodeIndex != _currentPlayback.episodeIndex) return;
+      if (record.playTimeSeconds < 10) return;
+      // 停在片尾的记录不必提示「从上次继续」。
+      if (record.totalTimeSeconds > 0 &&
+          record.playTimeSeconds >= record.totalTimeSeconds - 30) {
+        return;
+      }
+      // 播放器已经开始推进就不该再提示「从上次继续」。
+      if (_player.position.inSeconds > 10) return;
+      setState(() => _resumeHint = record.playTimeSeconds);
+      _resumeHintTimer?.cancel();
+      _resumeHintTimer = Timer(const Duration(seconds: 15), () {
+        if (mounted) setState(() => _resumeHint = null);
+      });
+    } on Object {
+      // 提示属增强信息，失败静默。
+    }
   }
 
   Future<void> _syncPlayProgress() async {
@@ -108,29 +146,64 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
     if (sources.length < 2) return;
     final picked = await showModalBottomSheet<MediaItem>(
       context: context,
-      builder: (sheetContext) => SafeArea(
-        child: ListView(
-          shrinkWrap: true,
+      isScrollControlled: true,
+      useSafeArea: true,
+      builder: (sheetContext) => DraggableScrollableSheet(
+        expand: false,
+        initialChildSize: 0.6,
+        minChildSize: 0.3,
+        maxChildSize: 0.9,
+        builder: (context, scrollController) => Column(
+          mainAxisSize: MainAxisSize.min,
           children: [
-            const ListTile(
-              dense: true,
-              title: Text('切换播放源'),
-            ),
-            for (final item in sources)
-              ListTile(
-                leading: Icon(
-                  item.source == _currentPlayback.item.source
-                      ? Icons.check_circle
-                      : Icons.movie_outlined,
-                ),
-                title: Text(
-                  item.sourceName.isEmpty ? item.source : item.sourceName,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                ),
-                subtitle: Text('共 ${item.episodes.length} 集'),
-                onTap: () => Navigator.of(sheetContext).pop(item),
+            const SizedBox(height: 8),
+            Container(
+              width: 42,
+              height: 4,
+              decoration: BoxDecoration(
+                color: Theme.of(sheetContext).colorScheme.outline,
+                borderRadius: BorderRadius.circular(99),
               ),
+            ),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(20, 10, 8, 4),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      '切换播放源',
+                      style: Theme.of(sheetContext).textTheme.titleLarge,
+                    ),
+                  ),
+                  TextButton(
+                    onPressed: () => Navigator.of(sheetContext).maybePop(),
+                    child: const Text('完成'),
+                  ),
+                ],
+              ),
+            ),
+            Flexible(
+              child: ListView(
+                controller: scrollController,
+                children: [
+                  for (final item in sources)
+                    ListTile(
+                      leading: Icon(
+                        item.source == _currentPlayback.item.source
+                            ? Icons.check_circle
+                            : Icons.movie_outlined,
+                      ),
+                      title: Text(
+                        item.sourceName.isEmpty ? item.source : item.sourceName,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                      subtitle: Text('共 ${item.episodes.length} 集'),
+                      onTap: () => Navigator.of(sheetContext).pop(item),
+                    ),
+                ],
+              ),
+            ),
           ],
         ),
       ),
@@ -236,6 +309,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
   void dispose() {
     _hideTimer?.cancel();
     _progressSyncTimer?.cancel();
+    _resumeHintTimer?.cancel();
     _player.dispose();
     _danmaku.dispose();
     super.dispose();
@@ -299,6 +373,24 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
                       // 控制栏收起时，弹幕状态胶囊一并隐藏。
                       showStatus: _controlsVisible,
                     ),
+                    if (_resumeHint != null)
+                      Positioned(
+                        left: 24,
+                        bottom: 118,
+                        child: _ResumeHint(
+                          seconds: _resumeHint!,
+                          onTap: () {
+                            final target = Duration(seconds: _resumeHint!);
+                            _resumeHintTimer?.cancel();
+                            setState(() => _resumeHint = null);
+                            unawaited(_player.seek(target));
+                          },
+                          onDismiss: () {
+                            _resumeHintTimer?.cancel();
+                            setState(() => _resumeHint = null);
+                          },
+                        ),
+                      ),
                     AnimatedBuilder(
                       animation: _player,
                       builder: (context, child) => _PlayerStatus(
@@ -331,8 +423,18 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
                         showModalBottomSheet<void>(
                           context: context,
                           isScrollControlled: true,
-                          builder: (context) =>
-                              DanmakuSettingsSheet(controller: _danmaku),
+                          useSafeArea: true,
+                          builder: (sheetContext) => DraggableScrollableSheet(
+                            expand: false,
+                            initialChildSize: 0.9,
+                            minChildSize: 0.28,
+                            maxChildSize: 0.95,
+                            builder: (context, scrollController) =>
+                                DanmakuSettingsSheet(
+                              controller: _danmaku,
+                              scrollController: scrollController,
+                            ),
+                          ),
                         );
                         _showControls();
                       },
@@ -347,6 +449,65 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
       ),
     );
   }
+}
+
+/// 「上次播放到 XX:XX，点击跳转」提示条。
+///
+/// 与网页版行为一致：只在用户点击时跳转，不强行打断从头播放。
+class _ResumeHint extends StatelessWidget {
+  const _ResumeHint({
+    required this.seconds,
+    required this.onTap,
+    required this.onDismiss,
+  });
+
+  final int seconds;
+  final VoidCallback onTap;
+  final VoidCallback onDismiss;
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: Colors.black.withValues(alpha: 0.62),
+      borderRadius: BorderRadius.circular(999),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(999),
+        onTap: onTap,
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(12, 6, 6, 6),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Icon(Icons.history, size: 16, color: Colors.white70),
+              const SizedBox(width: 6),
+              Text(
+                '上次播放到 ${_clockLabel(seconds)}，点击跳转',
+                style: const TextStyle(color: Colors.white, fontSize: 12),
+              ),
+              const SizedBox(width: 4),
+              InkResponse(
+                onTap: onDismiss,
+                radius: 16,
+                child: const Padding(
+                  padding: EdgeInsets.all(4),
+                  child: Icon(Icons.close, size: 14, color: Colors.white54),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+String _clockLabel(int seconds) {
+  final hours = seconds ~/ 3600;
+  final minutes = (seconds % 3600) ~/ 60;
+  final rest = seconds % 60;
+  final mm = minutes.toString().padLeft(2, '0');
+  final ss = rest.toString().padLeft(2, '0');
+  return hours > 0 ? '$hours:$mm:$ss' : '$mm:$ss';
 }
 
 class _PlayerStatus extends StatelessWidget {

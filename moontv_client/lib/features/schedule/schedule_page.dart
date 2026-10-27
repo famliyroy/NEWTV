@@ -1,4 +1,3 @@
-import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
@@ -7,6 +6,7 @@ import '../../domain/models/bangumi_schedule.dart';
 import '../../domain/models/media_item.dart';
 import '../../providers.dart';
 import '../../shared/widgets/error_view.dart';
+import '../../shared/widgets/smart_image.dart';
 
 final bangumiScheduleProvider = FutureProvider.autoDispose<BangumiSchedule>((ref) {
   return ref.watch(appDependenciesProvider).mediaRepository.bangumiSchedule();
@@ -166,11 +166,10 @@ class _BangumiTile extends StatelessWidget {
                     height: 82,
                     child: item.poster.isEmpty
                         ? ColoredBox(color: scheme.surfaceContainerHighest)
-                        : CachedNetworkImage(
-                            imageUrl: item.poster,
+                        : SmartImage(
+                            url: item.poster,
                             fit: BoxFit.cover,
-                            fadeInDuration: const Duration(milliseconds: 100),
-                            errorWidget: (context, url, error) => ColoredBox(
+                            errorBuilder: (context) => ColoredBox(
                               color: scheme.surfaceContainerHighest,
                               child: const Icon(Icons.broken_image_outlined, size: 18),
                             ),

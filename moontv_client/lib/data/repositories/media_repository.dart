@@ -110,20 +110,75 @@ class MediaRepository {
   Future<List<MediaItem>> favorites() => _api.favorites();
   Future<List<MediaItem>> bangumi() => _api.bangumi();
 
+  static const _playRecordTtl = Duration(minutes: 5);
+
+  Map<String, MediaItem>? _playRecords;
+  DateTime _playRecordsAge = DateTime.fromMillisecondsSinceEpoch(0);
+
+  /// 播放记录索引（`source+id` → 记录）。
+  ///
+  /// ⚠️ 后端 `GET /api/playrecords?key=` 是「删除该条记录」的语义，
+  /// 因此这里**只能全量拉取后本地匹配**，绝不能带 key 去查。
+  Future<Map<String, MediaItem>> playRecordMap({bool force = false}) async {
+    final fresh = DateTime.now().difference(_playRecordsAge) < _playRecordTtl;
+    if (!force && _playRecords != null && fresh) return _playRecords!;
+    try {
+      final list = await _api.history();
+      final map = <String, MediaItem>{};
+      for (final item in list) {
+        if (item.source.isEmpty || item.id.isEmpty) continue;
+        map[item.storageKey] = item;
+      }
+      _playRecords = map;
+      _playRecordsAge = DateTime.now();
+      return map;
+    } on Object {
+      // 拉取失败退回旧缓存：续播提示属于增强信息，不该打断播放。
+      return _playRecords ?? const {};
+    }
+  }
+
+  /// 单条播放记录（缓存未命中时返回 null）。
+  Future<MediaItem?> playRecordFor(MediaItem item) async {
+    if (item.source.isEmpty || item.id.isEmpty) return null;
+    final map = await playRecordMap();
+    return map[item.storageKey];
+  }
+
+  Future<void> invalidatePlayRecords() {
+    _playRecordsAge = DateTime.fromMillisecondsSinceEpoch(0);
+    return Future<void>.value();
+  }
+
   Future<void> savePlayRecord(
     MediaItem item, {
     required int episodeIndex,
     required int playTimeSeconds,
     required int totalTimeSeconds,
-  }) =>
-      _api.savePlayRecord(
-        item,
-        episodeIndex: episodeIndex,
+  }) async {
+    await _api.savePlayRecord(
+      item,
+      episodeIndex: episodeIndex,
+      playTimeSeconds: playTimeSeconds,
+      totalTimeSeconds: totalTimeSeconds,
+    );
+    // 同步本地索引：刚播完就回详情页时能立刻看到新进度，不必等 5 分钟 TTL。
+    final map = _playRecords;
+    if (map != null && item.source.isNotEmpty && item.id.isNotEmpty) {
+      map[item.storageKey] = item.copyWith(
+        lastEpisodeIndex: episodeIndex,
         playTimeSeconds: playTimeSeconds,
         totalTimeSeconds: totalTimeSeconds,
+        saveTime: DateTime.now().millisecondsSinceEpoch,
       );
+    }
+  }
 
-  Future<void> deletePlayRecord(MediaItem item) => _api.deletePlayRecord(item);
+  Future<void> deletePlayRecord(MediaItem item) async {
+    await _api.deletePlayRecord(item);
+    _playRecords?.remove(item.storageKey);
+  }
+
   Future<void> saveFavorite(MediaItem item) => _api.saveFavorite(item);
   Future<void> deleteFavorite(MediaItem item) => _api.deleteFavorite(item);
 
