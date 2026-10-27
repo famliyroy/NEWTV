@@ -11,6 +11,7 @@ import '../../core/config/app_settings.dart';
 import '../../core/config/server_config.dart';
 import '../../core/network/dio_client.dart';
 import '../../core/utils/image_url.dart';
+import '../../core/utils/local_resume_store.dart';
 import 'api/auth_api.dart';
 import 'api/danmaku_api.dart';
 import 'api/media_api.dart';
@@ -18,7 +19,7 @@ import 'repositories/danmaku_repository.dart';
 import 'repositories/media_repository.dart';
 
 class AppDependencies {
-  const AppDependencies({
+  AppDependencies({
     required this.preferences,
     required this.secureStorage,
     required this.serverStore,
@@ -29,7 +30,8 @@ class AppDependencies {
     required this.authApi,
     required this.mediaRepository,
     required this.danmakuRepository,
-  });
+    LocalResumeStore? localResumeStore,
+  }) : localResumeStore = localResumeStore ?? LocalResumeStore(preferences);
 
   final SharedPreferences preferences;
   final FlutterSecureStorage secureStorage;
@@ -41,6 +43,7 @@ class AppDependencies {
   final AuthApi authApi;
   final MediaRepository mediaRepository;
   final DanmakuRepository danmakuRepository;
+  final LocalResumeStore localResumeStore;
 
   static Future<AppDependencies> create() async {
     final preferences = await SharedPreferences.getInstance();

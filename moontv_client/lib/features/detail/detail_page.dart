@@ -442,11 +442,6 @@ class _DetailPageState extends ConsumerState<DetailPage> {
         item: item,
         episodeIndex: _selectedEpisode.clamp(0, item.episodes.length - 1),
         availableSources: _sources,
-        // 只有选中集等于记录集数才续播，其它集一律从头。
-        initialPositionSeconds: resumeStartSeconds(
-          item: item,
-          selectedEpisode: _selectedEpisode,
-        ),
       ),
     );
     if (!mounted) return;

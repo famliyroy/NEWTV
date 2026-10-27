@@ -152,11 +152,9 @@ class PlaybackContext {
     required this.item,
     required this.episodeIndex,
     this.availableSources = const [],
-    this.initialPositionSeconds = 0,
   });
 
   final MediaItem item;
   final int episodeIndex;
   final List<MediaItem> availableSources;
-  final int initialPositionSeconds;
 }

@@ -9,7 +9,7 @@ import 'package:media_kit_video/media_kit_video.dart';
 import 'package:window_manager/window_manager.dart';
 
 import '../../core/player/player_controller.dart';
-import '../../core/utils/playback_resume.dart';
+import '../../core/utils/local_resume_store.dart';
 import '../../domain/models/media_item.dart';
 import '../../providers.dart';
 import '../danmaku/danmaku_controller.dart';
@@ -25,25 +25,26 @@ class PlayerPage extends ConsumerStatefulWidget {
   ConsumerState<PlayerPage> createState() => _PlayerPageState();
 }
 
-class _PlayerPageState extends ConsumerState<PlayerPage> {
+class _PlayerPageState extends ConsumerState<PlayerPage>
+    with WidgetsBindingObserver {
   late final PlayerController _player;
   late final DanmakuController _danmaku;
+  late final ResumeSessionController _resumeSession;
   late PlaybackContext _currentPlayback;
   Timer? _hideTimer;
   Timer? _progressSyncTimer;
   var _controlsVisible = true;
   var _temporaryRate = false;
   var _leaving = false;
+  var _wasPlaying = false;
+  var _initialTenSecSynced = false;
   double? _previousRate;
   BoxFit _videoFit = BoxFit.contain;
-
-  /// 断点续播提示（秒）；非空时在左下角显示「上次播放到 XX:XX，点击跳转」。
-  int? _resumeHint;
-  Timer? _resumeHintTimer;
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _currentPlayback = widget.playback;
     final dependencies = ref.read(appDependenciesProvider);
     final server = dependencies.session.server!;
@@ -55,98 +56,152 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
       onCompleted: _handleEpisodeCompleted,
     );
     _danmaku = DanmakuController(dependencies.danmakuRepository, dependencies.settings);
-    _player.addListener(() {
-      _danmaku
-        ..setPosition(_player.position.inMilliseconds / 1000)
-        ..setPlaying(_player.playing)
-        ..setRate(_player.rate);
-    });
+    _resumeSession = ResumeSessionController(
+      store: dependencies.localResumeStore,
+      onSeek: (target) => unawaited(_player.seek(target)),
+    );
+    _player.addListener(_handlePlayerChanged);
     unawaited(_player.open(_currentPlayback));
     unawaited(_danmaku.loadFor(_currentPlayback));
+    unawaited(_loadResumeForCurrent());
     _progressSyncTimer = Timer.periodic(
       const Duration(seconds: 30),
       (_) => unawaited(_syncPlayProgress()),
     );
     _enterImmersiveMode();
     _scheduleHide();
-    unawaited(_checkResumeHint());
   }
 
-  /// 兜底续播：详情页没带初始位置时（例如从搜索直接进来），
-  /// 再查一次播放记录，命中同集且 >10s 时给一个可点击的提示。
-  Future<void> _checkResumeHint() async {
-    if (_currentPlayback.initialPositionSeconds > 0) return;
-    if (_currentPlayback.item.source.isEmpty || _currentPlayback.item.id.isEmpty) {
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.inactive ||
+        state == AppLifecycleState.paused ||
+        state == AppLifecycleState.detached) {
+      // 退后台或被系统回收前立即落盘，防止杀进程丢进度。
+      unawaited(_syncPlayProgress(immediate: true));
+    }
+  }
+
+  void _handlePlayerChanged() {
+    final pos = _player.position;
+    final dur = _player.duration;
+    final playing = _player.playing;
+    final buffering = _player.buffering;
+
+    _danmaku
+      ..setPosition(pos.inMilliseconds / 1000)
+      ..setPlaying(playing)
+      ..setRate(_player.rate);
+
+    final autoJumped = _resumeSession.onPlayerStateChanged(
+      position: pos,
+      duration: dur,
+      buffering: buffering,
+      playing: playing,
+    );
+    if (autoJumped && mounted) {
+      _showControls();
+    }
+
+    // 用户暂停瞬间立即写盘，确保暂停后直接退出/杀进程也能精准记住暂停点。
+    if (_wasPlaying && !playing) {
+      unawaited(_syncPlayProgress(immediate: true));
+    }
+    _wasPlaying = playing;
+
+    // 首次播放跨过 10 秒立即刷新一次记录（防 App 被杀导致退出钩子没跑）。
+    if (!_initialTenSecSynced &&
+        pos.inSeconds > LocalResumeRecord.minResumeSeconds) {
+      _initialTenSecSynced = true;
+      unawaited(_syncPlayProgress());
+    }
+  }
+
+  Future<void> _loadResumeForCurrent() {
+    final playback = _currentPlayback;
+    final repo = ref.read(appDependenciesProvider).mediaRepository;
+    return _resumeSession.loadFor(
+      playback,
+      serverRecordLoader: () => repo.playRecordFor(playback.item),
+    );
+  }
+
+  Future<void> _syncPlayProgress({
+    bool immediate = false,
+    int? overrideSeconds,
+  }) async {
+    // 在调用点同步取出快照，防止异步延迟后读到已切换的新集。
+    final item = _currentPlayback.item;
+    final episodeIndex = _currentPlayback.episodeIndex;
+    final playSec = overrideSeconds ?? _player.position.inSeconds;
+    final totalSec = _player.duration.inSeconds;
+    if (playSec <= 0) return;
+
+    final dependencies = ref.read(appDependenciesProvider);
+    // 仅当播放超过 10 秒（或用户主动拖动到此位置）时才覆盖本地断点，
+    // 防止刚点进视频前几秒就退出把原有的长进度冲掉。
+    if (playSec > LocalResumeRecord.minResumeSeconds ||
+        overrideSeconds != null) {
+      await dependencies.localResumeStore.write(
+        storageKey: item.storageKey,
+        episodeIndex: episodeIndex,
+        positionSeconds: playSec,
+        totalSeconds: totalSec,
+        title: item.title,
+        immediate: immediate,
+      );
+    }
+
+    if (playSec <= LocalResumeRecord.minResumeSeconds &&
+        overrideSeconds == null) {
       return;
     }
     try {
-      final record = await ref
-          .read(appDependenciesProvider)
-          .mediaRepository
-          .playRecordFor(_currentPlayback.item);
-      if (!mounted || record == null) return;
-      if (record.lastEpisodeIndex != _currentPlayback.episodeIndex) return;
-      if (record.playTimeSeconds < 10) return;
-      // 停在片尾的记录不必提示「从上次继续」。
-      if (record.totalTimeSeconds > 0 &&
-          record.playTimeSeconds >=
-              record.totalTimeSeconds - nearEndThresholdSeconds) {
-        return;
-      }
-      // 播放器已经开始推进就不该再提示「从上次继续」。
-      if (_player.position.inSeconds > 10) return;
-      setState(() => _resumeHint = record.playTimeSeconds);
-      _resumeHintTimer?.cancel();
-      _resumeHintTimer = Timer(const Duration(seconds: 5), () {
-        if (mounted) setState(() => _resumeHint = null);
-      });
-    } on Object {
-      // 提示属增强信息，失败静默。
-    }
-  }
-
-  Future<void> _syncPlayProgress() async {
-    final playSec = _player.position.inSeconds;
-    final totalSec = _player.duration.inSeconds;
-    if (playSec <= 0) return;
-    try {
-      await ref.read(appDependenciesProvider).mediaRepository.savePlayRecord(
-            _currentPlayback.item,
-            episodeIndex: _currentPlayback.episodeIndex,
-            playTimeSeconds: playSec,
-            totalTimeSeconds: totalSec,
-          );
+      await dependencies.mediaRepository.savePlayRecord(
+        item,
+        episodeIndex: episodeIndex,
+        playTimeSeconds: playSec,
+        totalTimeSeconds: totalSec,
+      );
     } on Object {
       // Progress sync errors should not interrupt playback.
     }
   }
 
   void _handleEpisodeCompleted() {
-    unawaited(_syncPlayProgress());
+    final item = _currentPlayback.item;
+    final episodeIndex = _currentPlayback.episodeIndex;
+    // 本集已看完：清除本集未完播断点，下次重进该集从头播。
+    unawaited(
+      ref.read(appDependenciesProvider).localResumeStore.markCompleted(
+            item.storageKey,
+            episodeIndex,
+            immediate: true,
+          ),
+    );
+    unawaited(_syncPlayProgress(immediate: true));
     final settings = ref.read(settingsProvider).settings;
     if (settings.autoplayNext && _player.hasNextEpisode) {
-      unawaited(_switchEpisode(_currentPlayback.episodeIndex + 1));
+      unawaited(_switchEpisode(episodeIndex + 1));
     }
   }
 
   Future<void> _switchEpisode(int nextIndex) async {
     if (nextIndex < 0 || nextIndex >= _currentPlayback.item.episodes.length) return;
-    await _syncPlayProgress();
+    await _syncPlayProgress(immediate: true);
     _danmaku.clear();
-    _resumeHintTimer?.cancel();
+    _initialTenSecSynced = false;
+    _wasPlaying = false;
     final nextContext = PlaybackContext(
       item: _currentPlayback.item,
       episodeIndex: nextIndex,
       availableSources: _currentPlayback.availableSources,
     );
     if (!mounted) return;
-    setState(() {
-      _currentPlayback = nextContext;
-      _resumeHint = null;
-    });
+    setState(() => _currentPlayback = nextContext);
     unawaited(_player.open(nextContext));
     unawaited(_danmaku.loadFor(nextContext));
-    unawaited(_checkResumeHint());
+    unawaited(_loadResumeForCurrent());
   }
 
   /// 换源：保留当前集号（对齐到新源的同一集），不必退回详情页。
@@ -220,7 +275,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
       ),
     );
     if (picked == null || !mounted) return;
-    await _syncPlayProgress().catchError((_) {});
+    await _syncPlayProgress(immediate: true).catchError((_) {});
     final index =
         _currentPlayback.episodeIndex.clamp(0, picked.episodes.length - 1);
     final next = PlaybackContext(
@@ -229,14 +284,12 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
       availableSources: _currentPlayback.availableSources,
     );
     _danmaku.clear();
-    _resumeHintTimer?.cancel();
-    setState(() {
-      _currentPlayback = next;
-      _resumeHint = null;
-    });
+    _initialTenSecSynced = false;
+    _wasPlaying = false;
+    setState(() => _currentPlayback = next);
     unawaited(_player.open(next));
     unawaited(_danmaku.loadFor(next));
-    unawaited(_checkResumeHint());
+    unawaited(_loadResumeForCurrent());
   }
 
   void _enterImmersiveMode() {
@@ -254,8 +307,8 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
     _leaving = true;
     _hideTimer?.cancel();
     _progressSyncTimer?.cancel();
-    // 退出前把进度写回服务端，失败不阻塞返回。
-    await _syncPlayProgress().catchError((_) {});
+    // 退出前把进度立即落盘并写回服务端，失败不阻塞返回。
+    await _syncPlayProgress(immediate: true).catchError((_) {});
     if (Platform.isAndroid) {
       await SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
       await SystemChrome.setPreferredOrientations(DeviceOrientation.values);
@@ -321,11 +374,34 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
     _showControls();
   }
 
+  void _handleUserManualSeek(Duration target) {
+    _resumeSession.onUserManualSeek();
+    unawaited(_player.seek(target));
+    final sec = target.inSeconds;
+    if (sec <= LocalResumeRecord.minResumeSeconds) {
+      unawaited(
+        ref
+            .read(appDependenciesProvider)
+            .localResumeStore
+            .remove(_currentPlayback.item.storageKey),
+      );
+    } else {
+      unawaited(_syncPlayProgress(overrideSeconds: sec));
+    }
+  }
+
+  void _handleRelativeSeek(Duration delta) {
+    _resumeSession.onUserManualSeek();
+    unawaited(_player.seekRelative(delta));
+  }
+
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _hideTimer?.cancel();
     _progressSyncTimer?.cancel();
-    _resumeHintTimer?.cancel();
+    _player.removeListener(_handlePlayerChanged);
+    _resumeSession.dispose();
     _player.dispose();
     _danmaku.dispose();
     super.dispose();
@@ -343,8 +419,8 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
       child: CallbackShortcuts(
         bindings: {
           const SingleActivator(LogicalKeyboardKey.space): () => unawaited(_player.toggle()),
-          const SingleActivator(LogicalKeyboardKey.arrowLeft): () => unawaited(_player.seekRelative(const Duration(seconds: -5))),
-          const SingleActivator(LogicalKeyboardKey.arrowRight): () => unawaited(_player.seekRelative(const Duration(seconds: 5))),
+          const SingleActivator(LogicalKeyboardKey.arrowLeft): () => _handleRelativeSeek(const Duration(seconds: -5)),
+          const SingleActivator(LogicalKeyboardKey.arrowRight): () => _handleRelativeSeek(const Duration(seconds: 5)),
           const SingleActivator(LogicalKeyboardKey.keyF): () => unawaited(_toggleFullscreen()),
           const SingleActivator(LogicalKeyboardKey.keyD): () => _danmaku.setEnabled(!_danmaku.enabled),
           const SingleActivator(LogicalKeyboardKey.keyN): () {
@@ -365,9 +441,9 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
                 onDoubleTapDown: (details) {
                   final width = MediaQuery.sizeOf(context).width;
                   if (details.localPosition.dx < width * 0.36) {
-                    unawaited(_player.seekRelative(const Duration(seconds: -10)));
+                    _handleRelativeSeek(const Duration(seconds: -10));
                   } else if (details.localPosition.dx > width * 0.64) {
-                    unawaited(_player.seekRelative(const Duration(seconds: 10)));
+                    _handleRelativeSeek(const Duration(seconds: 10));
                   } else {
                     unawaited(_player.toggle());
                   }
@@ -389,24 +465,6 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
                       // 控制栏收起时，弹幕状态胶囊一并隐藏。
                       showStatus: _controlsVisible,
                     ),
-                    if (_resumeHint != null)
-                      Positioned(
-                        left: 24,
-                        bottom: 118,
-                        child: _ResumeHint(
-                          seconds: _resumeHint!,
-                          onTap: () {
-                            final target = Duration(seconds: _resumeHint!);
-                            _resumeHintTimer?.cancel();
-                            setState(() => _resumeHint = null);
-                            unawaited(_player.seek(target));
-                          },
-                          onDismiss: () {
-                            _resumeHintTimer?.cancel();
-                            setState(() => _resumeHint = null);
-                          },
-                        ),
-                      ),
                     AnimatedBuilder(
                       animation: _player,
                       builder: (context, child) => _PlayerStatus(
@@ -425,9 +483,13 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
                       canSwitchSource: _currentPlayback.availableSources.length > 1,
                       onBack: _exitPage,
                       onToggle: () => unawaited(_player.toggle()),
-                      onSeek: (value) => unawaited(_player.seek(value)),
-                      onBack10: () => unawaited(_player.seekRelative(const Duration(seconds: -10))),
-                      onForward10: () => unawaited(_player.seekRelative(const Duration(seconds: 10))),
+                      onDragStart: () {
+                        _resumeSession.onUserManualSeek();
+                        _showControls();
+                      },
+                      onSeek: _handleUserManualSeek,
+                      onBack10: () => _handleRelativeSeek(const Duration(seconds: -10)),
+                      onForward10: () => _handleRelativeSeek(const Duration(seconds: 10)),
                       onNextEpisode: _player.hasNextEpisode
                           ? () => unawaited(_switchEpisode(_currentPlayback.episodeIndex + 1))
                           : null,
@@ -456,6 +518,44 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
                       },
                       onInteract: _showControls,
                     ),
+                    // 断点胶囊：位于进度条正下方（左对齐 left: 24），独立于 _ControlsOverlay 的 IgnorePointer。
+                    Positioned(
+                      left: 24,
+                      bottom: 50,
+                      child: AnimatedBuilder(
+                        animation: _resumeSession,
+                        builder: (context, _) {
+                          final mode = _resumeSession.mode;
+                          final seconds = _resumeSession.targetSeconds;
+                          final show = mode != null &&
+                              seconds != null &&
+                              _controlsVisible;
+                          return IgnorePointer(
+                            ignoring: !show,
+                            child: AnimatedOpacity(
+                              opacity: show ? 1 : 0,
+                              duration: const Duration(milliseconds: 180),
+                              child: mode == null || seconds == null
+                                  ? const SizedBox.shrink()
+                                  : ResumeCapsule(
+                                      mode: mode,
+                                      seconds: seconds,
+                                      onJump: () {
+                                        _showControls();
+                                        _resumeSession.jumpToResume();
+                                      },
+                                      onRestart: () {
+                                        _showControls();
+                                        unawaited(
+                                          _resumeSession.restartFromBeginning(),
+                                        );
+                                      },
+                                    ),
+                            ),
+                          );
+                        },
+                      ),
+                    ),
                   ],
                 ),
               ),
@@ -467,57 +567,342 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
   }
 }
 
-/// 「从上次位置继续？（XX:XX）」提示条。
+/// 断点胶囊展示模式。
+enum ResumeCapsuleMode {
+  /// 待跳转：「上次看到 12:34 ▸」，点击即跳。
+  pending,
+
+  /// 已在缓冲完成时自动跳转：「已跳到上次位置 12:34 · 从头看」，6 秒后自动消失。
+  autoJumped,
+}
+
+/// 播放页内断点胶囊与「缓冲完成自动跳转」状态机。
 ///
-/// 对齐网页版 MoonTVPlus 的 play-record-jump 交互：支持点击继续或「从头播」，5 秒无操作自动收起。
-class _ResumeHint extends StatelessWidget {
-  const _ResumeHint({
-    required this.seconds,
-    required this.onTap,
-    required this.onDismiss,
+/// 独立为 `ChangeNotifier` 以便在组件测试中精确模拟缓冲沿、拖动抢占与倒计时。
+class ResumeSessionController extends ChangeNotifier {
+  ResumeSessionController({
+    required this.store,
+    required this.onSeek,
   });
 
+  static const autoJumpFeedbackDuration = Duration(seconds: 6);
+  static const verifySeekDelay = Duration(milliseconds: 650);
+
+  final LocalResumeStore store;
+  final ValueChanged<Duration> onSeek;
+
+  String _storageKey = '';
+  LocalResumeRecord? _record;
+  ResumeCapsuleMode? _mode;
+  int? _targetSeconds;
+  var _autoResumedOnce = false;
+  var _userInteracted = false;
+  var _sawBufferingTrue = false;
+  var _disposed = false;
+  var _loadGeneration = 0;
+
+  Duration _position = Duration.zero;
+  Duration _duration = Duration.zero;
+  var _buffering = true;
+  var _playing = false;
+
+  Timer? _feedbackTimer;
+  Timer? _verifySeekTimer;
+
+  ResumeCapsuleMode? get mode => _mode;
+  int? get targetSeconds => _targetSeconds;
+  bool get visible => _mode != null && _targetSeconds != null;
+  bool get autoResumedOnce => _autoResumedOnce;
+
+  /// 加载当前播放集对应的本地断点（若本地尚无记录，则用传入项/服务端同集记录无缝种入）。
+  Future<void> loadFor(
+    PlaybackContext playback, {
+    Future<MediaItem?> Function()? serverRecordLoader,
+  }) async {
+    final generation = ++_loadGeneration;
+    _feedbackTimer?.cancel();
+    _verifySeekTimer?.cancel();
+    _storageKey = playback.item.storageKey;
+    _record = null;
+    _mode = null;
+    _targetSeconds = null;
+    _autoResumedOnce = false;
+    _userInteracted = false;
+    _sawBufferingTrue = false;
+    _position = Duration.zero;
+    _duration = Duration.zero;
+    _buffering = true;
+    _playing = false;
+    notifyListeners();
+
+    if (_storageKey.isEmpty) return;
+
+    var record = await store.read(_storageKey, playback.episodeIndex);
+    if (_disposed || generation != _loadGeneration) return;
+
+    // 首次升级或跨端观看兜底：本地无记录时尝试从当前条目或服务端记录种入。
+    if (record == null) {
+      MediaItem? fallbackItem;
+      if (playback.item.lastEpisodeIndex == playback.episodeIndex &&
+          playback.item.playTimeSeconds > LocalResumeRecord.minResumeSeconds) {
+        fallbackItem = playback.item;
+      } else if (serverRecordLoader != null) {
+        try {
+          final remote = await serverRecordLoader();
+          if (remote != null &&
+              remote.lastEpisodeIndex == playback.episodeIndex &&
+              remote.playTimeSeconds > LocalResumeRecord.minResumeSeconds) {
+            fallbackItem = remote;
+          }
+        } on Object {
+          // 服务端记录不可用时静默忽略。
+        }
+      }
+      if (_disposed || generation != _loadGeneration) return;
+      if (fallbackItem != null) {
+        final candidate = LocalResumeRecord(
+          storageKey: _storageKey,
+          episodeIndex: playback.episodeIndex,
+          positionSeconds: fallbackItem.playTimeSeconds,
+          totalSeconds: fallbackItem.totalTimeSeconds,
+          title: playback.item.title,
+          updatedAt: DateTime.now().millisecondsSinceEpoch,
+        );
+        if (candidate.isValidResume) {
+          await store.write(
+            storageKey: candidate.storageKey,
+            episodeIndex: candidate.episodeIndex,
+            positionSeconds: candidate.positionSeconds,
+            totalSeconds: candidate.totalSeconds,
+            title: candidate.title,
+          );
+          if (_disposed || generation != _loadGeneration) return;
+          record = candidate;
+        }
+      }
+    }
+
+    if (record == null || _userInteracted) return;
+    _record = record;
+    _targetSeconds = record.positionSeconds;
+    _mode = ResumeCapsuleMode.pending;
+    // 若在异步读取完成前播放器已缓冲就绪，立即检查一次自动跳转。
+    _tryAutoResume();
+    notifyListeners();
+  }
+
+  /// 接收播放器状态更新；若本次触发了「缓冲完成自动跳转」，返回 `true`。
+  bool onPlayerStateChanged({
+    required Duration position,
+    required Duration duration,
+    required bool buffering,
+    required bool playing,
+  }) {
+    _position = position;
+    _duration = duration;
+    _buffering = buffering;
+    _playing = playing;
+    if (buffering) {
+      _sawBufferingTrue = true;
+    }
+
+    if (_tryAutoResume()) {
+      notifyListeners();
+      return true;
+    }
+
+    // 待跳转状态下，若播放位置已自然越过记录点，胶囊自动淡出。
+    if (_mode == ResumeCapsuleMode.pending &&
+        _targetSeconds != null &&
+        position.inSeconds >= _targetSeconds! + 2) {
+      _mode = null;
+      notifyListeners();
+    }
+    return false;
+  }
+
+  bool _tryAutoResume() {
+    final record = _record;
+    if (record == null || _mode != ResumeCapsuleMode.pending) return false;
+    if (_autoResumedOnce || _userInteracted) return false;
+
+    // 缓冲完成信号：出现 buffering true -> false 下降沿（或秒开流已处于 playing 且 !buffering），且 duration > 0。
+    final ready = !_buffering &&
+        _duration > Duration.zero &&
+        (_sawBufferingTrue || _playing);
+    if (!ready) return false;
+
+    // 条件 3：当前播放位置必须 < 5 秒，否则说明已走了一段或用户已操作，不抢跳。
+    if (_position.inSeconds >= 5) return false;
+
+    final totalSec = _duration.inSeconds;
+    if (totalSec > 0 &&
+        record.positionSeconds >=
+            totalSec - LocalResumeRecord.tailThresholdSeconds) {
+      // 相对当前真实总时长已处于片尾 15 秒内，不再自动跳。
+      _mode = null;
+      _targetSeconds = null;
+      return false;
+    }
+
+    final clampedSec = totalSec > 2
+        ? record.positionSeconds.clamp(1, totalSec - 2)
+        : record.positionSeconds;
+
+    _autoResumedOnce = true;
+    _targetSeconds = clampedSec;
+    _mode = ResumeCapsuleMode.autoJumped;
+    final target = Duration(seconds: clampedSec);
+    onSeek(target);
+
+    // 真机兜底：部分 HLS 流在刚结束缓冲的瞬间可能吞掉首次 seek，650ms 后校验一次。
+    _verifySeekTimer?.cancel();
+    _verifySeekTimer = Timer(verifySeekDelay, () {
+      if (_disposed || _userInteracted) return;
+      if (_mode == ResumeCapsuleMode.autoJumped &&
+          !_buffering &&
+          _position.inSeconds < 5 &&
+          (clampedSec - _position.inSeconds).abs() > 5) {
+        onSeek(target);
+      }
+    });
+
+    _feedbackTimer?.cancel();
+    _feedbackTimer = Timer(autoJumpFeedbackDuration, () {
+      if (_disposed) return;
+      if (_mode == ResumeCapsuleMode.autoJumped) {
+        _mode = null;
+        notifyListeners();
+      }
+    });
+    return true;
+  }
+
+  /// 用户手动点击「上次看到 XX:XX ▸」胶囊。
+  void jumpToResume() {
+    final seconds = _targetSeconds;
+    _userInteracted = true;
+    _autoResumedOnce = true;
+    _feedbackTimer?.cancel();
+    _verifySeekTimer?.cancel();
+    _mode = null;
+    notifyListeners();
+    if (seconds != null) {
+      final totalSec = _duration.inSeconds;
+      final clamped = totalSec > 2 ? seconds.clamp(1, totalSec - 2) : seconds;
+      onSeek(Duration(seconds: clamped));
+    }
+  }
+
+  /// 用户点击「已跳到上次位置 XX:XX · 从头看」中的「从头看」。
+  Future<void> restartFromBeginning() async {
+    _userInteracted = true;
+    _autoResumedOnce = true;
+    _feedbackTimer?.cancel();
+    _verifySeekTimer?.cancel();
+    _mode = null;
+    notifyListeners();
+    onSeek(Duration.zero);
+    if (_storageKey.isNotEmpty) {
+      await store.remove(_storageKey);
+    }
+  }
+
+  /// 用户手动拖动进度条或触发快进/快退：取消尚未执行的自动跳转并收起胶囊。
+  void onUserManualSeek() {
+    _userInteracted = true;
+    _feedbackTimer?.cancel();
+    _verifySeekTimer?.cancel();
+    if (_mode != null) {
+      _mode = null;
+      notifyListeners();
+    }
+  }
+
+  @override
+  void dispose() {
+    _disposed = true;
+    _feedbackTimer?.cancel();
+    _verifySeekTimer?.cancel();
+    super.dispose();
+  }
+}
+
+/// 进度条下方的断点胶囊组件。
+///
+/// 样式与弹幕状态胶囊保持视觉统一（黑底 48% 透明度圆角胶囊、白字 12.5 号）：
+/// - `ResumeCapsuleMode.pending`：「上次看到 12:34 ▸」
+/// - `ResumeCapsuleMode.autoJumped`：「已跳到上次位置 12:34 · 从头看」
+class ResumeCapsule extends StatelessWidget {
+  const ResumeCapsule({
+    required this.mode,
+    required this.seconds,
+    required this.onJump,
+    required this.onRestart,
+    super.key,
+  });
+
+  final ResumeCapsuleMode mode;
   final int seconds;
-  final VoidCallback onTap;
-  final VoidCallback onDismiss;
+  final VoidCallback onJump;
+  final VoidCallback onRestart;
 
   @override
   Widget build(BuildContext context) {
+    final timeText = _clockLabel(seconds);
+    if (mode == ResumeCapsuleMode.pending) {
+      return Material(
+        color: Colors.black.withValues(alpha: 0.48),
+        borderRadius: BorderRadius.circular(999),
+        child: InkWell(
+          borderRadius: BorderRadius.circular(999),
+          onTap: onJump,
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+            child: Text(
+              '上次看到 $timeText ▸',
+              style: const TextStyle(
+                color: Colors.white,
+                fontSize: 12.5,
+                fontWeight: FontWeight.w500,
+              ),
+            ),
+          ),
+        ),
+      );
+    }
+
     return Material(
-      color: Colors.black.withValues(alpha: 0.72),
+      color: Colors.black.withValues(alpha: 0.48),
       borderRadius: BorderRadius.circular(999),
       child: Padding(
-        padding: const EdgeInsets.fromLTRB(12, 4, 8, 4),
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
         child: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
-            const Icon(Icons.history, size: 16, color: Colors.white70),
-            const SizedBox(width: 6),
             Text(
-              '从上次位置继续？（${_clockLabel(seconds)}）',
-              style: const TextStyle(color: Colors.white, fontSize: 12),
-            ),
-            const SizedBox(width: 6),
-            TextButton(
-              style: TextButton.styleFrom(
-                visualDensity: VisualDensity.compact,
-                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-                minimumSize: Size.zero,
-                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+              '已跳到上次位置 $timeText · ',
+              style: const TextStyle(
+                color: Colors.white,
+                fontSize: 12.5,
               ),
-              onPressed: onTap,
-              child: const Text('继续', style: TextStyle(fontSize: 12)),
             ),
-            TextButton(
-              style: TextButton.styleFrom(
-                visualDensity: VisualDensity.compact,
-                foregroundColor: Colors.white70,
-                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-                minimumSize: Size.zero,
-                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+            InkWell(
+              borderRadius: BorderRadius.circular(6),
+              onTap: onRestart,
+              child: const Padding(
+                padding: EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+                child: Text(
+                  '从头看',
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontSize: 12.5,
+                    fontWeight: FontWeight.w700,
+                    decoration: TextDecoration.underline,
+                    decorationColor: Colors.white70,
+                  ),
+                ),
               ),
-              onPressed: onDismiss,
-              child: const Text('从头播', style: TextStyle(fontSize: 12)),
             ),
           ],
         ),
@@ -606,6 +991,7 @@ class _ControlsOverlay extends StatelessWidget {
     required this.canSwitchSource,
     required this.onBack,
     required this.onToggle,
+    required this.onDragStart,
     required this.onSeek,
     required this.onBack10,
     required this.onForward10,
@@ -628,6 +1014,7 @@ class _ControlsOverlay extends StatelessWidget {
   final bool canSwitchSource;
   final VoidCallback onBack;
   final VoidCallback onToggle;
+  final VoidCallback onDragStart;
   final ValueChanged<Duration> onSeek;
   final VoidCallback onBack10;
   final VoidCallback onForward10;
@@ -798,7 +1185,7 @@ class _ControlsOverlay extends StatelessWidget {
             Positioned(
               left: 24,
               right: 24,
-              bottom: 72,
+              bottom: 76,
               child: IgnorePointer(
                 ignoring: !visible,
                 child: AnimatedOpacity(
@@ -807,6 +1194,7 @@ class _ControlsOverlay extends StatelessWidget {
                   child: PlayerProgressBar(
                     position: position,
                     duration: duration,
+                    onDragStart: onDragStart,
                     onSeek: onSeek,
                     onInteract: onInteract,
                   ),
@@ -935,6 +1323,7 @@ class PlayerProgressBar extends StatefulWidget {
     required this.duration,
     required this.onSeek,
     required this.onInteract,
+    this.onDragStart,
     super.key,
   });
 
@@ -942,6 +1331,7 @@ class PlayerProgressBar extends StatefulWidget {
   final Duration duration;
   final ValueChanged<Duration> onSeek;
   final VoidCallback onInteract;
+  final VoidCallback? onDragStart;
 
   @override
   State<PlayerProgressBar> createState() => _PlayerProgressBarState();
@@ -1029,6 +1419,7 @@ class _PlayerProgressBarState extends State<PlayerProgressBar> {
             onChangeStart: totalMs <= 0
                 ? null
                 : (value) {
+                    widget.onDragStart?.call();
                     widget.onInteract();
                     _convergenceTimer?.cancel();
                     setState(() {

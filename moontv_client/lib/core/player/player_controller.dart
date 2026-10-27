@@ -9,7 +9,6 @@ import 'package:media_kit_video/media_kit_video.dart';
 import '../../core/config/app_settings.dart';
 import '../../core/config/server_config.dart';
 import '../../core/network/api_exception.dart';
-import '../../core/utils/playback_resume.dart';
 import '../../data/api/media_api.dart';
 import '../../domain/models/media_item.dart';
 import 'hls_quality.dart';
@@ -52,12 +51,11 @@ class PlayerController extends ChangeNotifier {
     _subscriptions.addAll([
       player.stream.position.listen((value) {
         _position = value;
-        _consumePendingSeek();
         notifyListeners();
       }),
       player.stream.duration.listen((value) {
         _duration = value;
-        _consumePendingSeek();
+        _consumeQualitySeek();
         notifyListeners();
       }),
       player.stream.playing.listen((value) {
@@ -66,6 +64,7 @@ class PlayerController extends ChangeNotifier {
       }),
       player.stream.buffering.listen((value) {
         _buffering = value;
+        _consumeQualitySeek();
         notifyListeners();
       }),
       player.stream.completed.listen((completed) {
@@ -112,7 +111,7 @@ class PlayerController extends ChangeNotifier {
   PlaybackContext? _context;
   Duration _position = Duration.zero;
   Duration _duration = Duration.zero;
-  Duration? _pendingInitialSeek;
+  Duration? _pendingQualitySeek;
   double _rate = 1.0;
   String? _errorDetail;
   String? _rawUrl;
@@ -155,9 +154,7 @@ class PlayerController extends ChangeNotifier {
     _duration = Duration.zero;
     _variants = const [];
     _selectedQuality = autoQualityLabel;
-    _pendingInitialSeek = context.initialPositionSeconds > 0
-        ? Duration(seconds: context.initialPositionSeconds)
-        : null;
+    _pendingQualitySeek = null;
     notifyListeners();
     final episodes = context.item.episodes;
     if (episodes.isEmpty) {
@@ -212,23 +209,13 @@ class PlayerController extends ChangeNotifier {
     }
   }
 
-  /// 媒体时长为 0 时 seek 会被播放器忽略，因此初始续播位置要等到
-  /// duration 可用后再执行，并且只执行一次。
-  ///
-  /// 片尾阈值与详情页/继续观看提示保持一致（30 秒）：太靠后的记录不跳，
-  /// 否则会停在放不出画面的位置。
-  void _consumePendingSeek() {
-    final target = _pendingInitialSeek;
-    if (target == null || _duration <= Duration.zero) return;
-    _pendingInitialSeek = null;
+  /// 清晰度切换后恢复原播放位置（仅用于播放中切码率，初始断点续播由播放页缓冲就绪信号统一接管）。
+  void _consumeQualitySeek() {
+    final target = _pendingQualitySeek;
+    if (target == null || _duration <= Duration.zero || _buffering) return;
+    _pendingQualitySeek = null;
     if (target <= Duration.zero) return;
-    if (target.inSeconds >= _duration.inSeconds - nearEndThresholdSeconds) {
-      if (kDebugMode) {
-        debugPrint('NEWTV skip near-end resume: $target / $_duration');
-      }
-      return;
-    }
-    unawaited(player.seek(target));
+    unawaited(seek(target));
   }
 
   /// 拉取 master playlist 并测速。失败时静默降级为「自动（单一流）」。
@@ -328,7 +315,7 @@ class PlayerController extends ChangeNotifier {
     _errorDetail = null;
     _duration = Duration.zero;
     _position = Duration.zero;
-    _pendingInitialSeek =
+    _pendingQualitySeek =
         resume > const Duration(seconds: 2) ? resume : null;
     notifyListeners();
     if (kDebugMode) debugPrint('NEWTV switch quality ($label): ${_candidates.first}');
@@ -407,14 +394,15 @@ class PlayerController extends ChangeNotifier {
     if (current != null) await open(current);
   }
 
-  static Duration _clampDuration(Duration value, Duration min, Duration max) {
-    if (value < min) return min;
-    if (value > max) return max;
-    return value;
-  }
-
   Future<void> toggle() async => _playing ? player.pause() : player.play();
-  Future<void> seek(Duration value) => player.seek(_clampDuration(value, Duration.zero, _duration));
+  Future<void> seek(Duration value) {
+    final target = value < Duration.zero
+        ? Duration.zero
+        : (_duration > Duration.zero && value > _duration
+            ? _duration
+            : value);
+    return player.seek(target);
+  }
   Future<void> seekRelative(Duration delta) => seek(_position + delta);
   Future<void> setRate(double rate) {
     _rate = rate;
