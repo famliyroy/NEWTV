@@ -1,7 +1,7 @@
 name: moontv_client
 description: NEWTV - a native Flutter client for a self-hosted MoonTVPlus server.
 publish_to: 'none'
-version: 0.1.10+11
+version: 0.1.11+12
 
 environment:
   sdk: '>=3.6.0 <4.0.0'
